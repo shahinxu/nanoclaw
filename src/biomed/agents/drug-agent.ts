@@ -1,11 +1,13 @@
 import {
   AgentAssessment,
   AgentEvaluationTrace,
+  AgentRoundContext,
   BiomedTaskSample,
   EvidenceItem,
   ExpertJudge,
   HypothesisRecord,
   PlannerAction,
+  ResearchReviewContext,
   ResearchToolAdapter,
 } from '../types.js';
 
@@ -133,6 +135,7 @@ export class DrugAgent {
   async assess(
     sample: BiomedTaskSample,
     hypotheses: HypothesisRecord[],
+    roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
     const drugIds = getDrugIds(sample);
     const proteinId = getPrimaryProteinId(sample);
@@ -141,15 +144,30 @@ export class DrugAgent {
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     for (const drugId of drugIds) {
+      const reviewContext: ResearchReviewContext = {
+        roundNumber: roundContext?.roundNumber ?? 1,
+        focusMode:
+          roundContext && roundContext.roundNumber > 1
+            ? 'mechanism_only'
+            : 'broad',
+        focalQuestion: roundContext?.focus[0],
+        focus: roundContext?.focus ?? [],
+        peerFindings: roundContext?.peerAssessmentSummaries ?? [],
+        targetDrugId: drugId,
+        targetProteinId: proteinId,
+      };
+
       plannerActions.push({
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
         hypothesisStatement:
           hypotheses[0]?.statement ??
           'The queried drug-protein-disease relationship exists.',
         verificationGoal:
-          proteinId !== undefined
-            ? `Check whether drug ${drugId} has direct mechanism or target support involving protein ${proteinId}.`
-            : `Check whether drug ${drugId} has drug-side mechanism evidence relevant to the current sample.`,
+          roundContext && roundContext.focus.length > 0
+            ? `Round ${roundContext.roundNumber} targeted re-check for drug ${drugId}: ${roundContext.focus.join(' | ')}`
+            : proteinId !== undefined
+              ? `Check whether drug ${drugId} has direct mechanism or target support involving protein ${proteinId}.`
+              : `Check whether drug ${drugId} has drug-side mechanism evidence relevant to the current sample.`,
         expectedEvidence: [
           'direct drug-target evidence',
           'mechanism-of-action description',
@@ -160,13 +178,17 @@ export class DrugAgent {
         toolCalls: [
           {
             tool: 'drug_researcher',
-            arguments: { drugbank_id: drugId },
+            arguments: {
+              drugbank_id: drugId,
+              review_context: reviewContext,
+            },
           },
         ],
       });
 
       const result = await this.toolAdapter.callTool('drug_researcher', {
         drugbank_id: drugId,
+        review_context: reviewContext,
       });
 
       evidenceItems.push({
@@ -209,8 +231,12 @@ export class DrugAgent {
             agentRole: 'drug',
             sample,
             hypothesis: hypotheses[0],
+            roundContext,
             toolName: 'drug_researcher',
-            toolArguments: { drugbank_id: drugId },
+            toolArguments: {
+              drugbank_id: drugId,
+              review_context: reviewContext,
+            },
             toolResult: result,
           });
           mechanismSignal = judgeSignal;
@@ -224,7 +250,10 @@ export class DrugAgent {
       evaluationTrace.push({
         id: `drug-trace-${sample.sampleIndex}-${drugId}`,
         toolName: 'drug_researcher',
-        toolArguments: { drugbank_id: drugId },
+        toolArguments: {
+          drugbank_id: drugId,
+          review_context: reviewContext,
+        },
         entityScope: proteinId ? [drugId, proteinId] : [drugId],
         rawToolOutput: result,
         judgeOutput: judgeSignal,
@@ -261,6 +290,7 @@ export class DrugAgent {
     return {
       agentId: this.agentId,
       role: 'drug',
+      roundNumber: roundContext?.roundNumber ?? 1,
       summary,
       hypothesesTouched: hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,

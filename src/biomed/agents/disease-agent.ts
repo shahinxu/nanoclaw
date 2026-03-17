@@ -1,11 +1,13 @@
 import {
   AgentAssessment,
   AgentEvaluationTrace,
+  AgentRoundContext,
   BiomedTaskSample,
   EvidenceItem,
   ExpertJudge,
   HypothesisRecord,
   PlannerAction,
+  ResearchReviewContext,
   ResearchToolAdapter,
 } from '../types.js';
 
@@ -120,6 +122,7 @@ export class DiseaseAgent {
   async assess(
     sample: BiomedTaskSample,
     hypotheses: HypothesisRecord[],
+    roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
     const diseaseId = getPrimaryDiseaseId(sample);
     const proteinId = getPrimaryProteinId(sample);
@@ -128,13 +131,28 @@ export class DiseaseAgent {
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     if (diseaseId) {
+      const reviewContext: ResearchReviewContext = {
+        roundNumber: roundContext?.roundNumber ?? 1,
+        focusMode:
+          roundContext && roundContext.roundNumber > 1
+            ? 'target_alignment'
+            : 'broad',
+        focalQuestion: roundContext?.focus[0],
+        focus: roundContext?.focus ?? [],
+        peerFindings: roundContext?.peerAssessmentSummaries ?? [],
+        targetProteinId: proteinId,
+        targetDiseaseId: diseaseId,
+      };
+
       plannerActions.push({
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
         hypothesisStatement:
           hypotheses[0]?.statement ??
           'The queried drug-protein-disease relationship exists.',
         verificationGoal: proteinId
-          ? `Check whether disease ${diseaseId} provides context consistent with protein ${proteinId}, while keeping drug mechanism separate.`
+          ? roundContext && roundContext.focus.length > 0
+            ? `Round ${roundContext.roundNumber} targeted re-check for disease ${diseaseId}: ${roundContext.focus.join(' | ')}`
+            : `Check whether disease ${diseaseId} provides context consistent with protein ${proteinId}, while keeping drug mechanism separate.`
           : `Check disease ${diseaseId} background and treatment context for the current sample.`,
         expectedEvidence: [
           'disease definition',
@@ -146,13 +164,17 @@ export class DiseaseAgent {
         toolCalls: [
           {
             tool: 'disease_researcher',
-            arguments: { mondo_id: diseaseId },
+            arguments: {
+              mondo_id: diseaseId,
+              review_context: reviewContext,
+            },
           },
         ],
       });
 
       const result = await this.toolAdapter.callTool('disease_researcher', {
         mondo_id: diseaseId,
+        review_context: reviewContext,
       });
 
       evidenceItems.push({
@@ -195,8 +217,12 @@ export class DiseaseAgent {
             agentRole: 'disease',
             sample,
             hypothesis: hypotheses[0],
+            roundContext,
             toolName: 'disease_researcher',
-            toolArguments: { mondo_id: diseaseId },
+            toolArguments: {
+              mondo_id: diseaseId,
+              review_context: reviewContext,
+            },
             toolResult: result,
           });
           diseaseSignal = judgeSignal;
@@ -210,7 +236,10 @@ export class DiseaseAgent {
       evaluationTrace.push({
         id: `disease-trace-${sample.sampleIndex}-${diseaseId}`,
         toolName: 'disease_researcher',
-        toolArguments: { mondo_id: diseaseId },
+        toolArguments: {
+          mondo_id: diseaseId,
+          review_context: reviewContext,
+        },
         entityScope: proteinId ? [diseaseId, proteinId] : [diseaseId],
         rawToolOutput: result,
         judgeOutput: judgeSignal,
@@ -247,6 +276,7 @@ export class DiseaseAgent {
     return {
       agentId: this.agentId,
       role: 'disease',
+      roundNumber: roundContext?.roundNumber ?? 1,
       summary,
       hypothesesTouched: hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,

@@ -1,11 +1,13 @@
 import {
   AgentAssessment,
   AgentEvaluationTrace,
+  AgentRoundContext,
   BiomedTaskSample,
   EvidenceItem,
   ExpertJudge,
   HypothesisRecord,
   PlannerAction,
+  ResearchReviewContext,
   ResearchToolAdapter,
 } from '../types.js';
 
@@ -123,6 +125,7 @@ export class ProteinAgent {
   async assess(
     sample: BiomedTaskSample,
     hypotheses: HypothesisRecord[],
+    roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
     const proteinIds = getProteinIds(sample);
     const diseaseId = getPrimaryDiseaseId(sample);
@@ -131,13 +134,28 @@ export class ProteinAgent {
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     for (const proteinId of proteinIds) {
+      const reviewContext: ResearchReviewContext = {
+        roundNumber: roundContext?.roundNumber ?? 1,
+        focusMode:
+          roundContext && roundContext.roundNumber > 1
+            ? 'disease_alignment'
+            : 'broad',
+        focalQuestion: roundContext?.focus[0],
+        focus: roundContext?.focus ?? [],
+        peerFindings: roundContext?.peerAssessmentSummaries ?? [],
+        targetProteinId: proteinId,
+        targetDiseaseId: diseaseId,
+      };
+
       plannerActions.push({
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
         hypothesisStatement:
           hypotheses[0]?.statement ??
           'The queried drug-protein-disease relationship exists.',
         verificationGoal: diseaseId
-          ? `Check whether protein ${proteinId} has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
+          ? roundContext && roundContext.focus.length > 0
+            ? `Round ${roundContext.roundNumber} targeted re-check for protein ${proteinId}: ${roundContext.focus.join(' | ')}`
+            : `Check whether protein ${proteinId} has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
           : `Check whether protein ${proteinId} has disease-relevant evidence for the current sample.`,
         expectedEvidence: [
           'protein function summary',
@@ -149,13 +167,17 @@ export class ProteinAgent {
         toolCalls: [
           {
             tool: 'protein_researcher',
-            arguments: { gene_symbol: proteinId },
+            arguments: {
+              gene_symbol: proteinId,
+              review_context: reviewContext,
+            },
           },
         ],
       });
 
       const result = await this.toolAdapter.callTool('protein_researcher', {
         gene_symbol: proteinId,
+        review_context: reviewContext,
       });
 
       evidenceItems.push({
@@ -198,8 +220,12 @@ export class ProteinAgent {
             agentRole: 'protein',
             sample,
             hypothesis: hypotheses[0],
+            roundContext,
             toolName: 'protein_researcher',
-            toolArguments: { gene_symbol: proteinId },
+            toolArguments: {
+              gene_symbol: proteinId,
+              review_context: reviewContext,
+            },
             toolResult: result,
           });
           diseaseSignal = judgeSignal;
@@ -213,7 +239,10 @@ export class ProteinAgent {
       evaluationTrace.push({
         id: `protein-trace-${sample.sampleIndex}-${proteinId}`,
         toolName: 'protein_researcher',
-        toolArguments: { gene_symbol: proteinId },
+        toolArguments: {
+          gene_symbol: proteinId,
+          review_context: reviewContext,
+        },
         entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
         rawToolOutput: result,
         judgeOutput: judgeSignal,
@@ -250,6 +279,7 @@ export class ProteinAgent {
     return {
       agentId: this.agentId,
       role: 'protein',
+      roundNumber: roundContext?.roundNumber ?? 1,
       summary,
       hypothesesTouched: hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,

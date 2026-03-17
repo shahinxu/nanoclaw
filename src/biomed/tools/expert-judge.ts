@@ -54,6 +54,7 @@ function sharedSystemPrompt(): string {
     'Your job is not to decide the final label. Your job is to judge whether ONE expert tool output supports, contradicts, or is insufficient for that expert role.',
     'Treat the tool output conservatively but do not ignore clear structured evidence.',
     'Use only the provided sample, hypothesis, tool output, and structured result.',
+    'If peer findings are provided, use them only to focus what this round should verify or reject. Do not treat peer claims as evidence unless they are reflected in the current tool output.',
     'Return JSON only with keys: stance, strength, claim.',
     'Valid stance values: supports, contradicts, insufficient.',
     'Valid strength values: strong, moderate, weak.',
@@ -231,6 +232,17 @@ function buildMessages(input: ExpertJudgeInput): OpenRouterMessage[] {
     role: 'user',
     content: stringifyJson({
       role: input.agentRole,
+      roundNumber: input.roundContext?.roundNumber ?? 1,
+      reviewFocus: input.roundContext?.focus ?? [],
+      priorRoundSummaries: input.roundContext?.priorRoundSummaries ?? [],
+      peerAssessmentSummaries:
+        input.roundContext?.peerAssessmentSummaries ?? [],
+      unresolvedDisagreements:
+        input.roundContext?.disagreements.map((item) => ({
+          title: item.title,
+          question: item.question,
+          rationale: item.rationale,
+        })) ?? [],
       sample: input.sample.entityDict,
       hypothesis: input.hypothesis?.statement ?? null,
       toolName: input.toolName,

@@ -6,6 +6,74 @@ from typing import Any, Dict, List, Optional
 import requests
 
 
+def _normalize_review_context(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return value
+
+
+def _non_empty_strings(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _protein_focus_keywords(protein_id: Optional[str]) -> List[str]:
+    protein = (protein_id or '').strip().upper()
+    if not protein:
+        return []
+    if protein.startswith('CACN'):
+        return [protein.lower(), 'calcium channel', 'voltage gated calcium channel', 'l type calcium channel']
+    if protein.startswith('ADRB'):
+        return [protein.lower(), 'adrenergic receptor', 'beta adrenergic receptor', 'adrenoceptor']
+    if protein.startswith('ADRA'):
+        return [protein.lower(), 'adrenergic receptor', 'alpha adrenergic receptor', 'adrenoceptor']
+    if protein.startswith('AGTR'):
+        return [protein.lower(), 'angiotensin receptor']
+    if protein == 'EGFR':
+        return ['egfr', 'epidermal growth factor receptor']
+    if protein == 'MTOR':
+        return ['mtor', 'mechanistic target of rapamycin']
+    if protein == 'DHFR':
+        return ['dhfr', 'dihydrofolate reductase']
+    return [protein.lower()]
+
+
+def _disease_focus_keywords(disease_id: Optional[str]) -> List[str]:
+    disease = (disease_id or '').strip().upper()
+    if disease == 'MONDO:0005044':
+        return ['hypertension', 'hypertensive', 'blood pressure', 'arterial blood pressure']
+    if disease == 'MONDO:0005045':
+        return ['cardiac', 'heart', 'hypertrophic cardiomyopathy', 'myocard']
+    return []
+
+
+def _text_contains_any(text: str, keywords: List[str]) -> List[str]:
+    searchable = text.lower()
+    return [keyword for keyword in keywords if keyword.lower() in searchable]
+
+
+def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[str]) -> str:
+    if not review_context:
+        return ''
+    segments: List[str] = []
+    focus_mode = str(review_context.get('focusMode') or '').strip()
+    focal_question = str(review_context.get('focalQuestion') or '').strip()
+    if focus_mode:
+        segments.append(f'Targeted review mode: {focus_mode}.')
+    if focal_question:
+        segments.append(f'Focused question: {focal_question}')
+    focus = _non_empty_strings(review_context.get('focus'))
+    if focus:
+        segments.append('Round focus: ' + ' | '.join(focus[:3]) + '.')
+    peer_findings = _non_empty_strings(review_context.get('peerFindings'))
+    if peer_findings:
+        segments.append('Peer concerns carried into this review: ' + ' | '.join(peer_findings[:2]))
+    if notes:
+        segments.extend([note for note in notes if note])
+    return ' '.join(segment for segment in segments if segment)
+
+
 def _http_get(
     url: str,
     *,
@@ -24,13 +92,18 @@ def _http_post(
     return requests.post(url, json=json_payload, timeout=timeout)
 
 
-def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
+def _drug_researcher(
+    drugbank_id: Optional[str],
+    review_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     did = (drugbank_id or '').strip()
+    review = _normalize_review_context(review_context)
     if not did:
         return {
             'text_summary': '[drug_researcher] No DrugBank ID provided; unable to look up a drug profile.',
             'structured': {
                 'drugbank_id': None,
+                'review_context': review,
                 'name': None,
                 'mechanism_of_action': None,
                 'max_clinical_phase': None,
@@ -46,6 +119,7 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
             'text_summary': f'[drug_researcher] ChEMBL API lookup failed for {did}; no drug profile was produced.',
             'structured': {
                 'drugbank_id': did,
+                'review_context': review,
                 'name': None,
                 'mechanism_of_action': None,
                 'max_clinical_phase': None,
@@ -68,6 +142,7 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
             'text_summary': f'[drug_researcher] ChEMBL returned no molecule_chembl_id for {did}; no drug profile was produced.',
             'structured': {
                 'drugbank_id': did,
+                'review_context': review,
                 'name': None,
                 'mechanism_of_action': None,
                 'max_clinical_phase': None,
@@ -88,6 +163,28 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
     max_phase = chembl_molecule.get('max_phase')
     mechanisms = _fetch_chembl_mechanisms(chembl_id)
     indications = _fetch_chembl_indications(chembl_id)
+    target_protein = str(review.get('targetProteinId') or '').strip() or None
+    protein_keyword_hits: List[str] = []
+    direct_mechanism_matches: List[Dict[str, Any]] = []
+    if target_protein:
+        for mechanism in mechanisms:
+            if not isinstance(mechanism, dict):
+                continue
+            mechanism_text = ' '.join([
+                str(mechanism.get('mechanism_of_action') or ''),
+                str(mechanism.get('action_type') or ''),
+            ]).strip()
+            matched = _text_contains_any(mechanism_text, _protein_focus_keywords(target_protein))
+            if matched:
+                protein_keyword_hits.extend([
+                    keyword for keyword in matched if keyword not in protein_keyword_hits
+                ])
+                direct_mechanism_matches.append({
+                    'mechanism_of_action': mechanism.get('mechanism_of_action'),
+                    'action_type': mechanism.get('action_type'),
+                    'target_chembl_id': mechanism.get('target_chembl_id'),
+                    'matched_keywords': matched,
+                })
 
     summary_parts: List[str] = [f'Drug profile for {did}.']
     if name and str(name) != 'nan':
@@ -104,18 +201,43 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
             + '; '.join(moa_texts[:3])
             + '.'
         )
+    if direct_mechanism_matches:
+        summary_parts.append(
+            f'Targeted mechanism review for {target_protein} found keyword-aligned mechanism evidence: '
+            + '; '.join([
+                str(item.get('mechanism_of_action') or '')
+                for item in direct_mechanism_matches[:3]
+                if str(item.get('mechanism_of_action') or '').strip()
+            ])
+            + '.'
+        )
+    elif target_protein and str(review.get('focusMode') or '') == 'mechanism_only':
+        summary_parts.append(
+            f'Targeted mechanism review for {target_protein} did not find a direct protein-aligned mechanism string in the returned ChEMBL mechanism fields.'
+        )
 
     indication_terms: List[str] = []
     for indication in indications:
         term = indication.get('mesh_heading') or indication.get('efo_term')
         if isinstance(term, str) and term.strip() and term.strip() not in indication_terms:
             indication_terms.append(term.strip())
-    if indication_terms:
+    if indication_terms and str(review.get('focusMode') or '') != 'mechanism_only':
         summary_parts.append(
             'Reported clinical indications (from ChEMBL drug_indication; not task labels) include: '
             + ', '.join(indication_terms[:5])
             + '.'
         )
+
+    targeted_review = _build_targeted_review_summary(
+        review,
+        [
+            f'Protein keyword hits in mechanism fields: {", ".join(protein_keyword_hits[:5])}.' if protein_keyword_hits else '',
+            'Non-mechanism indication context was intentionally de-emphasized for this round.'
+            if str(review.get('focusMode') or '') == 'mechanism_only' else '',
+        ],
+    )
+    if targeted_review:
+        summary_parts.append(targeted_review)
 
     if len(summary_parts) == 1:
         summary_parts.append(
@@ -126,6 +248,7 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
         'text_summary': ' '.join(summary_parts),
         'structured': {
             'drugbank_id': did,
+            'review_context': review,
             'name': name,
             'mechanism_of_action': [
                 {
@@ -150,6 +273,14 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
                 if isinstance(indication, dict)
             ],
             'safety_flags': _extract_chembl_safety_flags(chembl_molecule),
+            'targeted_review': {
+                'focus_mode': review.get('focusMode'),
+                'focal_question': review.get('focalQuestion'),
+                'target_protein_id': target_protein,
+                'direct_mechanism_matches': direct_mechanism_matches,
+                'protein_keyword_hits': protein_keyword_hits,
+                'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
             'sources': [
                 {
                     'type': 'chembl_api',
@@ -162,13 +293,18 @@ def _drug_researcher(drugbank_id: Optional[str]) -> Dict[str, Any]:
     }
 
 
-def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
+def _protein_researcher(
+    gene_symbol: Optional[str],
+    review_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     gene = (gene_symbol or '').strip()
+    review = _normalize_review_context(review_context)
     if not gene:
         return {
             'text_summary': '[protein_researcher] No gene symbol provided; unable to look up a protein profile.',
             'structured': {
                 'gene_symbol': None,
+                'review_context': review,
                 'protein_name': None,
                 'uniprot_accession': None,
                 'organism': None,
@@ -186,6 +322,7 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
             'text_summary': f'[protein_researcher] UniProt lookup failed for {gene}; no protein profile was produced.',
             'structured': {
                 'gene_symbol': gene,
+                'review_context': review,
                 'protein_name': None,
                 'uniprot_accession': None,
                 'organism': None,
@@ -219,6 +356,19 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
         reactome_pathways = _fetch_reactome_pathways(accession.strip())
     if not reactome_pathways:
         reactome_pathways = _extract_reactome_xrefs_from_uniprot(entry)
+    target_disease = str(review.get('targetDiseaseId') or '').strip() or None
+    disease_keyword_hits = _text_contains_any(
+        ' '.join([
+            function_description or '',
+            ' '.join(biological_processes),
+            ' '.join([
+                str(pathway.get('pathway_name') or pathway.get('display_name') or '')
+                for pathway in reactome_pathways
+                if isinstance(pathway, dict)
+            ]),
+        ]),
+        _disease_focus_keywords(target_disease),
+    ) if target_disease else []
 
     summary_parts: List[str] = [f'Protein profile for {gene}.']
     if protein_name:
@@ -249,6 +399,27 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
             ])
             + '.'
         )
+    if target_disease and str(review.get('focusMode') or '') == 'disease_alignment':
+        if disease_keyword_hits:
+            summary_parts.append(
+                f'Targeted disease-alignment review for {target_disease} found matching disease-related terms in protein annotations: '
+                + ', '.join(disease_keyword_hits[:5])
+                + '.'
+            )
+        else:
+            summary_parts.append(
+                f'Targeted disease-alignment review for {target_disease} did not find clear disease-specific terms in the available UniProt or Reactome annotations.'
+            )
+    targeted_review = _build_targeted_review_summary(
+        review,
+        [
+            f'Disease keyword hits in protein annotations: {", ".join(disease_keyword_hits[:5])}.' if disease_keyword_hits else '',
+            'This round emphasized disease-alignment evidence over generic localization detail.'
+            if str(review.get('focusMode') or '') == 'disease_alignment' else '',
+        ],
+    )
+    if targeted_review:
+        summary_parts.append(targeted_review)
     if len(summary_parts) == 1:
         summary_parts.append('No additional UniProt or Reactome annotations were available.')
 
@@ -256,6 +427,7 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
         'text_summary': ' '.join(summary_parts),
         'structured': {
             'gene_symbol': gene,
+            'review_context': review,
             'protein_name': protein_name,
             'uniprot_accession': accession,
             'organism': organism,
@@ -263,6 +435,13 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
             'biological_processes': biological_processes,
             'subcellular_localization': subcellular_localization,
             'reactome_pathways': reactome_pathways,
+            'targeted_review': {
+                'focus_mode': review.get('focusMode'),
+                'focal_question': review.get('focalQuestion'),
+                'target_disease_id': target_disease,
+                'disease_keyword_hits': disease_keyword_hits,
+                'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
             'sources': [
                 {
                     'type': 'uniprot_api',
@@ -280,13 +459,18 @@ def _protein_researcher(gene_symbol: Optional[str]) -> Dict[str, Any]:
     }
 
 
-def _disease_researcher(mondo_id: Optional[str]) -> Dict[str, Any]:
+def _disease_researcher(
+    mondo_id: Optional[str],
+    review_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     disease_id = _normalize_mondo_id(mondo_id)
+    review = _normalize_review_context(review_context)
     if not disease_id:
         return {
             'text_summary': '[disease_researcher] No MONDO ID provided; unable to look up a disease profile.',
             'structured': {
                 'mondo_id': None,
+                'review_context': review,
                 'name': None,
                 'definition': None,
                 'classification': [],
@@ -336,11 +520,20 @@ def _disease_researcher(mondo_id: Optional[str]) -> Dict[str, Any]:
             if isinstance(row, dict)
         ])
 
+    target_protein = str(review.get('targetProteinId') or '').strip() or None
+    matched_targets = [
+        row
+        for row in associated_targets
+        if isinstance(row, dict)
+        and str(row.get('approved_symbol') or '').strip().upper() == str(target_protein or '').upper()
+    ]
+
     if not name and not definition and not associated_targets and not standard_treatments:
         return {
             'text_summary': f'[disease_researcher] No disease profile was produced for {disease_id} from Open Targets APIs.',
             'structured': {
                 'mondo_id': disease_id,
+                'review_context': review,
                 'name': None,
                 'definition': None,
                 'classification': [],
@@ -382,6 +575,15 @@ def _disease_researcher(mondo_id: Optional[str]) -> Dict[str, Any]:
             ])
             + '.'
         )
+    if target_protein and str(review.get('focusMode') or '') == 'target_alignment':
+        if matched_targets:
+            summary_parts.append(
+                f'Targeted target-alignment review found {target_protein} explicitly listed among disease-associated targets.'
+            )
+        else:
+            summary_parts.append(
+                f'Targeted target-alignment review did not find {target_protein} in the returned disease-associated target list.'
+            )
     if standard_treatments:
         summary_parts.append(
             'Known treatment signals include: '
@@ -393,14 +595,28 @@ def _disease_researcher(mondo_id: Optional[str]) -> Dict[str, Any]:
             + '.'
         )
 
+    targeted_review = _build_targeted_review_summary(
+        review,
+        [
+            f'Explicit associated-target match for queried protein: {target_protein}.'
+            if matched_targets and target_protein else '',
+            f'Queried protein {target_protein} was absent from the returned associated-target list.'
+            if target_protein and not matched_targets and str(review.get('focusMode') or '') == 'target_alignment' else '',
+        ],
+    )
+    if targeted_review:
+        summary_parts.append(targeted_review)
+
     return {
         'text_summary': ' '.join(summary_parts),
         'structured': {
             'mondo_id': disease_id,
+            'review_context': review,
             'name': name,
             'definition': definition,
             'classification': classification,
             'associated_targets': associated_targets,
+            'matched_associated_targets': matched_targets,
             'standard_treatments': standard_treatments,
             'db_xrefs': db_xrefs,
             'orphanet_xrefs': [xref for xref in db_xrefs if str(xref).startswith('Orphanet')],
@@ -415,6 +631,13 @@ def _disease_researcher(mondo_id: Optional[str]) -> Dict[str, Any]:
                     'note': 'MalaCards does not provide a stable public unauthenticated API endpoint, so it is not queried directly.',
                 },
             ],
+            'targeted_review': {
+                'focus_mode': review.get('focusMode'),
+                'focal_question': review.get('focalQuestion'),
+                'target_protein_id': target_protein,
+                'matched_associated_targets': matched_targets,
+                'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
         },
     }
 
@@ -742,10 +965,11 @@ def _extract_chembl_safety_flags(chembl_molecule: Optional[Dict[str, Any]]) -> L
 
 
 def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    review_context = arguments.get('review_context')
     if name == 'drug_researcher':
-        return _drug_researcher(arguments.get('drugbank_id'))
+        return _drug_researcher(arguments.get('drugbank_id'), review_context)
     if name == 'protein_researcher':
-        return _protein_researcher(arguments.get('gene_symbol'))
+        return _protein_researcher(arguments.get('gene_symbol'), review_context)
     if name == 'disease_researcher':
-        return _disease_researcher(arguments.get('mondo_id'))
+        return _disease_researcher(arguments.get('mondo_id'), review_context)
     raise ValueError(f'Unsupported research tool: {name}')

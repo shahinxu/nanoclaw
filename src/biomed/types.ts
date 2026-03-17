@@ -65,6 +65,21 @@ export interface ResearchToolResult {
   error?: string;
 }
 
+export interface ResearchReviewContext {
+  roundNumber: number;
+  focusMode:
+    | 'broad'
+    | 'mechanism_only'
+    | 'disease_alignment'
+    | 'target_alignment';
+  focalQuestion?: string;
+  focus: string[];
+  peerFindings: string[];
+  targetDrugId?: string;
+  targetProteinId?: string;
+  targetDiseaseId?: string;
+}
+
 export interface ResearchToolAdapter {
   callTool(
     toolName: string,
@@ -83,6 +98,7 @@ export interface ExpertJudgeInput {
   agentRole: 'drug' | 'protein' | 'disease';
   sample: BiomedTaskSample;
   hypothesis: HypothesisRecord | undefined;
+  roundContext?: AgentRoundContext;
   toolName: string;
   toolArguments: Record<string, unknown>;
   toolResult: ResearchToolResult;
@@ -105,9 +121,30 @@ export interface AgentEvaluationTrace {
   finalSource: 'judge' | 'heuristic';
 }
 
+export interface RoundDisagreement {
+  id: string;
+  roundNumber: number;
+  title: string;
+  question: string;
+  affectedRoles: Array<'drug' | 'protein' | 'disease'>;
+  rationale: string;
+  triggeringEvidenceIds: string[];
+  status: 'open' | 'carried-forward' | 'resolved';
+}
+
+export interface AgentRoundContext {
+  roundNumber: number;
+  maxRounds: number;
+  focus: string[];
+  disagreements: RoundDisagreement[];
+  priorRoundSummaries: string[];
+  peerAssessmentSummaries: string[];
+}
+
 export interface AgentAssessment {
   agentId: string;
   role: 'drug' | 'protein' | 'disease' | 'graph' | 'arbiter';
+  roundNumber: number;
   summary: string;
   hypothesesTouched: string[];
   plannerActions: PlannerAction[];
@@ -116,11 +153,22 @@ export interface AgentAssessment {
 }
 
 export interface DecisionRecord {
-  label: BiomedLabel | null;
+  status: 'supported' | 'refuted' | 'insufficient';
+  decisionMode: 'settled' | 'best-effort-insufficient';
+  label: BiomedLabel;
   confidence: number;
   rationale: string;
   blockingGaps: string[];
   contradictions: string[];
+}
+
+export interface SampleRoundRecord {
+  roundNumber: number;
+  focus: string[];
+  disagreements: RoundDisagreement[];
+  assessments: AgentAssessment[];
+  evidenceItems: EvidenceItem[];
+  summary: string;
 }
 
 export interface SampleTraceRecord {
@@ -129,6 +177,7 @@ export interface SampleTraceRecord {
   entityDict: Record<string, BiomedEntityValue>;
   groundTruth?: BiomedLabel;
   hypotheses: HypothesisRecord[];
+  rounds: SampleRoundRecord[];
   assessments: AgentAssessment[];
   evidenceItems: EvidenceItem[];
   decision: DecisionRecord;

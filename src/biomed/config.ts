@@ -1,6 +1,7 @@
 export interface BiomedWorkflowConfig {
   workspaceRoot: string;
   dataDir: string;
+  graphDataDir: string;
   pythonExecutable: string;
   openRouterApiKeyPath: string;
   openRouterBaseUrl: string;
@@ -14,6 +15,7 @@ export interface BiomedWorkflowConfig {
 export const DEFAULT_BIOMED_CONFIG: BiomedWorkflowConfig = {
   workspaceRoot: '/home/zhx/drug_agent',
   dataDir: '/home/zhx/drug_agent/data_edge_test',
+  graphDataDir: '/home/zhx/drug_agent/data_edge_train',
   pythonExecutable: '/home/zhx/miniconda3/envs/drug_agent/bin/python',
   openRouterApiKeyPath: '/home/zhx/drug_agent/openrouter_api_key.txt',
   openRouterBaseUrl: 'https://openrouter.ai/api/v1',
