@@ -121,8 +121,10 @@ export class LocalGraphTool {
           continue;
         }
 
-        const labelColumn = 'hyperedge_label' in row ? 'hyperedge_label' : 'label';
-        const label = Number.parseInt(row[labelColumn] ?? '0', 10) === 1 ? 1 : 0;
+        const labelColumn =
+          'hyperedge_label' in row ? 'hyperedge_label' : 'label';
+        const label =
+          Number.parseInt(row[labelColumn] ?? '0', 10) === 1 ? 1 : 0;
         if (label !== 1) {
           continue;
         }
@@ -187,9 +189,11 @@ export class LocalGraphTool {
       sharedDrugProteinCount: sharedDrugProtein.length,
       sharedDrugDiseaseCount: sharedDrugDisease.length,
       sharedProteinDiseaseCount: sharedProteinDisease.length,
-      pairCoverageCount: [sharedDrugProtein, sharedDrugDisease, sharedProteinDisease]
-        .filter((items) => items.length > 0)
-        .length,
+      pairCoverageCount: [
+        sharedDrugProtein,
+        sharedDrugDisease,
+        sharedProteinDisease,
+      ].filter((items) => items.length > 0).length,
       supportScore:
         Math.min(sharedDrugProtein.length, 3) * 2 +
         Math.min(sharedDrugDisease.length, 3) * 2 +
@@ -247,7 +251,8 @@ export class LocalGraphTool {
       textSummary: summaryParts.join(' '),
       structured: {
         query: { drug, protein, disease },
-        leakageControl: 'Exact queried hyperedge is excluded from local graph counts.',
+        leakageControl:
+          'Exact queried hyperedge is excluded from local graph counts.',
         positiveNeighborhood: evidence,
       },
     };

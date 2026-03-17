@@ -68,31 +68,31 @@ export class GraphAgent {
     ];
 
     const result = this.localGraphTool.inspectSample(sample);
-    const structured = result.structured as
-      | {
-          positiveNeighborhood?: {
-            sharedDrugProteinCount?: number;
-            sharedDrugDiseaseCount?: number;
-            sharedProteinDiseaseCount?: number;
-            pairCoverageCount?: number;
-            supportScore?: number;
-            threeWayClosure?: boolean;
-            proteinDiseaseBackbone?: boolean;
-            drugProteinBackbone?: boolean;
-            drugDiseaseBackbone?: boolean;
-          };
-        }
-      | null;
+    const structured = result.structured as {
+      positiveNeighborhood?: {
+        sharedDrugProteinCount?: number;
+        sharedDrugDiseaseCount?: number;
+        sharedProteinDiseaseCount?: number;
+        pairCoverageCount?: number;
+        supportScore?: number;
+        threeWayClosure?: boolean;
+        proteinDiseaseBackbone?: boolean;
+        drugProteinBackbone?: boolean;
+        drugDiseaseBackbone?: boolean;
+      };
+    } | null;
     const neighborhood = structured?.positiveNeighborhood;
     const pairSupportCount = neighborhood?.pairCoverageCount ?? 0;
     const supportScore = neighborhood?.supportScore ?? 0;
     const threeWayClosure = neighborhood?.threeWayClosure ?? false;
-    const proteinDiseaseBackbone = neighborhood?.proteinDiseaseBackbone ?? false;
+    const proteinDiseaseBackbone =
+      neighborhood?.proteinDiseaseBackbone ?? false;
     const drugProteinBackbone = neighborhood?.drugProteinBackbone ?? false;
     const drugDiseaseBackbone = neighborhood?.drugDiseaseBackbone ?? false;
     const sharedDrugProteinCount = neighborhood?.sharedDrugProteinCount ?? 0;
     const sharedDrugDiseaseCount = neighborhood?.sharedDrugDiseaseCount ?? 0;
-    const sharedProteinDiseaseCount = neighborhood?.sharedProteinDiseaseCount ?? 0;
+    const sharedProteinDiseaseCount =
+      neighborhood?.sharedProteinDiseaseCount ?? 0;
 
     const finalOutput =
       sharedProteinDiseaseCount >= 5 ||

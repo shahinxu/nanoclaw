@@ -44,9 +44,11 @@ function getPrimaryEntity(
 }
 
 function disagreementFingerprint(item: RoundDisagreement): string {
-  return [item.title, item.question, [...item.affectedRoles].sort().join(',')].join(
-    '::',
-  );
+  return [
+    item.title,
+    item.question,
+    [...item.affectedRoles].sort().join(','),
+  ].join('::');
 }
 
 function createRoleGapQuestion(
@@ -78,7 +80,9 @@ function deriveRoundDisagreements(
   );
 
   for (const assessment of assessments) {
-    if (!BIOMED_ROLES.includes(assessment.role as (typeof BIOMED_ROLES)[number])) {
+    if (
+      !BIOMED_ROLES.includes(assessment.role as (typeof BIOMED_ROLES)[number])
+    ) {
       continue;
     }
 
@@ -199,7 +203,9 @@ function buildRoundContext(
   const roleDisagreements =
     role === 'graph'
       ? unresolvedDisagreements
-      : unresolvedDisagreements.filter((item) => item.affectedRoles.includes(role));
+      : unresolvedDisagreements.filter((item) =>
+          item.affectedRoles.includes(role),
+        );
   const previousRound = rounds.at(-1);
 
   return {
@@ -291,7 +297,11 @@ export class BiomedWorkflowRunner {
     const arbiter = new Arbiter();
 
     let latestAssessments: AgentAssessment[] = [];
-    for (let roundNumber = 1; roundNumber <= this.config.maxRounds; roundNumber++) {
+    for (
+      let roundNumber = 1;
+      roundNumber <= this.config.maxRounds;
+      roundNumber++
+    ) {
       const drugAssessment = await drugAgent.assess(
         sample,
         hypotheses,
@@ -357,17 +367,15 @@ export class BiomedWorkflowRunner {
         evidenceItems: latestAssessments.flatMap(
           (assessment) => assessment.evidenceItems,
         ),
-        summary: createRoundSummary(roundNumber, latestAssessments, disagreements),
+        summary: createRoundSummary(
+          roundNumber,
+          latestAssessments,
+          disagreements,
+        ),
       };
       state = advanceHypothesisState(state, round);
 
-      if (
-        !shouldContinue(
-          roundNumber,
-          this.config.maxRounds,
-          disagreements,
-        )
-      ) {
+      if (!shouldContinue(roundNumber, this.config.maxRounds, disagreements)) {
         break;
       }
     }

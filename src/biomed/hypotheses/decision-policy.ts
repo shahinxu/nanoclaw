@@ -147,17 +147,18 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
 
   if (
     summary.graphSupports > 0 &&
-    [summary.drugSupports, summary.proteinSupports, summary.diseaseSupports].filter(
-      (count) => count > 0,
-    ).length >= 2
+    [
+      summary.drugSupports,
+      summary.proteinSupports,
+      summary.diseaseSupports,
+    ].filter((count) => count > 0).length >= 2
   ) {
     return {
       status: 'supported',
       decisionMode: 'settled',
       label: 1,
       confidence: 0.7,
-      rationale:
-        `${buildRationale(summary, blockingGaps)} Graph neighborhood evidence supplies an additional structural bridge, so the positive decision is treated as settled.`,
+      rationale: `${buildRationale(summary, blockingGaps)} Graph neighborhood evidence supplies an additional structural bridge, so the positive decision is treated as settled.`,
       blockingGaps,
       contradictions: [],
     };
@@ -165,17 +166,18 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
 
   if (
     summary.graphStrongSupports > 0 &&
-    [summary.drugSupports, summary.proteinSupports, summary.diseaseSupports].filter(
-      (count) => count > 0,
-    ).length >= 1
+    [
+      summary.drugSupports,
+      summary.proteinSupports,
+      summary.diseaseSupports,
+    ].filter((count) => count > 0).length >= 1
   ) {
     return {
       status: 'supported',
       decisionMode: 'settled',
       label: 1,
       confidence: 0.72,
-      rationale:
-        `${buildRationale(summary, blockingGaps)} Strong graph evidence supplies a high-confidence structural bridge, and at least one domain expert also supports the triplet, so the decision is promoted to settled positive.`,
+      rationale: `${buildRationale(summary, blockingGaps)} Strong graph evidence supplies a high-confidence structural bridge, and at least one domain expert also supports the triplet, so the decision is promoted to settled positive.`,
       blockingGaps,
       contradictions: [],
     };
@@ -188,8 +190,7 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
       decisionMode: 'best-effort-insufficient',
       label: fallbackLabel,
       confidence: 0.45,
-      rationale:
-        `${buildRationale(summary, blockingGaps)} Current evidence remains insufficient for a settled positive or negative decision. A symmetric best-effort export label of ${fallbackLabel} is returned for compatibility, but debate and targeted evidence collection should continue.`,
+      rationale: `${buildRationale(summary, blockingGaps)} Current evidence remains insufficient for a settled positive or negative decision. A symmetric best-effort export label of ${fallbackLabel} is returned for compatibility, but debate and targeted evidence collection should continue.`,
       blockingGaps,
       contradictions: [],
     };
@@ -201,8 +202,7 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
       decisionMode: 'best-effort-insufficient',
       label: 0,
       confidence: 0.25,
-      rationale:
-        `${buildRationale(summary, blockingGaps)} Evidence was collected, but it does not yet justify a settled positive or negative decision. A best-effort export label of 0 is returned because no majority support emerged, but debate and evidence collection should continue.`,
+      rationale: `${buildRationale(summary, blockingGaps)} Evidence was collected, but it does not yet justify a settled positive or negative decision. A best-effort export label of 0 is returned because no majority support emerged, but debate and evidence collection should continue.`,
       blockingGaps,
       contradictions: [],
     };
@@ -213,8 +213,7 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
     decisionMode: 'best-effort-insufficient',
     label: 0,
     confidence: 0,
-    rationale:
-      `${buildRationale(summary, blockingGaps)} No meaningful evidence has been established yet. A best-effort export label of 0 is returned for compatibility only, and the case should remain treated as unresolved.`,
+    rationale: `${buildRationale(summary, blockingGaps)} No meaningful evidence has been established yet. A best-effort export label of 0 is returned for compatibility only, and the case should remain treated as unresolved.`,
     blockingGaps,
     contradictions: [],
   };
