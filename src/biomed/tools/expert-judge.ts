@@ -30,7 +30,9 @@ function parseJudgeResponse(text: string): ExpertJudgeResult {
   const claim = parsed.claim;
 
   if (
-    (stance !== 'supports' && stance !== 'contradicts' && stance !== 'insufficient') ||
+    (stance !== 'supports' &&
+      stance !== 'contradicts' &&
+      stance !== 'insufficient') ||
     (strength !== 'strong' && strength !== 'moderate' && strength !== 'weak') ||
     typeof claim !== 'string' ||
     claim.trim() === ''
@@ -98,7 +100,10 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
             'Mechanism-of-action hints: Thiazide-sensitive sodium-chloride cotransporter inhibitor. Indications include hypertension.',
           structured: {
             mechanism_of_action: [
-              { description: 'Thiazide-sensitive sodium-chloride cotransporter inhibitor' },
+              {
+                description:
+                  'Thiazide-sensitive sodium-chloride cotransporter inhibitor',
+              },
             ],
           },
         }),
@@ -112,8 +117,12 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
       {
         user: stringifyJson({
           sample: { drug: 'DBY', protein: 'AGTR1', disease: 'MONDO:0005044' },
-          toolSummary: 'Indications include hypertension. No mechanism-of-action data available.',
-          structured: { mechanism_of_action: null, approved_indications: [{ mesh_heading: 'Hypertension' }] },
+          toolSummary:
+            'Indications include hypertension. No mechanism-of-action data available.',
+          structured: {
+            mechanism_of_action: null,
+            approved_indications: [{ mesh_heading: 'Hypertension' }],
+          },
         }),
         assistant: {
           stance: 'insufficient',
@@ -130,7 +139,8 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
       {
         user: stringifyJson({
           sample: { drug: 'DBX', protein: 'AGTR1', disease: 'MONDO:0005044' },
-          toolSummary: 'Function: angiotensin II receptor. Biological processes include blood pressure regulation.',
+          toolSummary:
+            'Function: angiotensin II receptor. Biological processes include blood pressure regulation.',
           structured: { biological_processes: ['blood pressure regulation'] },
         }),
         assistant: {
@@ -143,8 +153,14 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
       {
         user: stringifyJson({
           sample: { drug: 'DBX', protein: 'SLC12A3', disease: 'MONDO:0005044' },
-          toolSummary: 'Function: sodium and chloride transport in kidney tubules.',
-          structured: { biological_processes: ['sodium ion transport', 'chloride ion transport'] },
+          toolSummary:
+            'Function: sodium and chloride transport in kidney tubules.',
+          structured: {
+            biological_processes: [
+              'sodium ion transport',
+              'chloride ion transport',
+            ],
+          },
         }),
         assistant: {
           stance: 'insufficient',
@@ -160,8 +176,11 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
     {
       user: stringifyJson({
         sample: { drug: 'DBX', protein: 'AGTR1', disease: 'MONDO:0005044' },
-        toolSummary: 'Associated targets include AGTR1 with a high score. Known treatments include angiotensin receptor antagonists.',
-        structured: { associated_targets: [{ approved_symbol: 'AGTR1', score: 0.71 }] },
+        toolSummary:
+          'Associated targets include AGTR1 with a high score. Known treatments include angiotensin receptor antagonists.',
+        structured: {
+          associated_targets: [{ approved_symbol: 'AGTR1', score: 0.71 }],
+        },
       }),
       assistant: {
         stance: 'supports',
@@ -173,8 +192,14 @@ function promptExamples(role: ExpertJudgeInput['agentRole']): PromptExample[] {
     {
       user: stringifyJson({
         sample: { drug: 'DBX', protein: 'SLC12A3', disease: 'MONDO:0005044' },
-        toolSummary: 'Associated targets include AGTR1, AGT, CACNA1D, ADRB1, and ACE.',
-        structured: { associated_targets: [{ approved_symbol: 'AGTR1' }, { approved_symbol: 'ACE' }] },
+        toolSummary:
+          'Associated targets include AGTR1, AGT, CACNA1D, ADRB1, and ACE.',
+        structured: {
+          associated_targets: [
+            { approved_symbol: 'AGTR1' },
+            { approved_symbol: 'ACE' },
+          ],
+        },
       }),
       assistant: {
         stance: 'insufficient',
@@ -196,7 +221,10 @@ function buildMessages(input: ExpertJudgeInput): OpenRouterMessage[] {
 
   for (const example of promptExamples(input.agentRole)) {
     messages.push({ role: 'user', content: example.user });
-    messages.push({ role: 'assistant', content: stringifyJson(example.assistant) });
+    messages.push({
+      role: 'assistant',
+      content: stringifyJson(example.assistant),
+    });
   }
 
   messages.push({
@@ -220,26 +248,33 @@ export class OpenRouterExpertJudge implements ExpertJudge {
   private readonly apiKey: string;
 
   constructor(private readonly config: BiomedWorkflowConfig) {
-    this.apiKey = fs.readFileSync(this.config.openRouterApiKeyPath, 'utf-8').trim();
+    this.apiKey = fs
+      .readFileSync(this.config.openRouterApiKeyPath, 'utf-8')
+      .trim();
   }
 
   async judge(input: ExpertJudgeInput): Promise<ExpertJudgeResult> {
-    const response = await fetch(`${this.config.openRouterBaseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
+    const response = await fetch(
+      `${this.config.openRouterBaseUrl}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.config.expertJudgeModel,
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          messages: buildMessages(input),
+        }),
       },
-      body: JSON.stringify({
-        model: this.config.expertJudgeModel,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: buildMessages(input),
-      }),
-    });
+    );
 
     if (!response.ok) {
-      throw new Error(`OpenRouter judge request failed with status ${response.status}.`);
+      throw new Error(
+        `OpenRouter judge request failed with status ${response.status}.`,
+      );
     }
 
     const payload = (await response.json()) as {

@@ -9,10 +9,7 @@ export interface BiomedTaskSample {
   groundTruth?: BiomedLabel;
 }
 
-export type HypothesisKind =
-  | 'positive'
-  | 'negative'
-  | 'alternative-mechanism';
+export type HypothesisKind = 'positive' | 'negative' | 'alternative-mechanism';
 
 export type HypothesisStatus =
   | 'open'

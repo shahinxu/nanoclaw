@@ -35,12 +35,17 @@ function summarizeSupport(evidenceItems: EvidenceItem[]): SupportSummary {
     diseaseSupports: evidenceItems.filter(
       (item) => item.stance === 'supports' && item.source === 'disease_agent',
     ).length,
-    contradictions: evidenceItems.filter((item) => item.stance === 'contradicts'),
+    contradictions: evidenceItems.filter(
+      (item) => item.stance === 'contradicts',
+    ),
     allEvidence: evidenceItems,
   };
 }
 
-function buildRationale(summary: SupportSummary, blockingGaps: string[]): string {
+function buildRationale(
+  summary: SupportSummary,
+  blockingGaps: string[],
+): string {
   const clauses: string[] = [];
 
   clauses.push(
@@ -89,7 +94,11 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
     };
   }
 
-  if (summary.drugSupports > 0 && summary.proteinSupports > 0 && summary.diseaseSupports > 0) {
+  if (
+    summary.drugSupports > 0 &&
+    summary.proteinSupports > 0 &&
+    summary.diseaseSupports > 0
+  ) {
     return {
       label: 1,
       confidence: 0.75,

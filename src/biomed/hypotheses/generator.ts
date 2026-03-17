@@ -20,13 +20,11 @@ export function generateInitialHypotheses(
     },
     {
       id: `H-negative-${sample.sampleIndex}`,
-      statement: 'The queried drug-protein-disease relationship is unsupported or false.',
+      statement:
+        'The queried drug-protein-disease relationship is unsupported or false.',
       kind: 'negative',
       status: 'open',
-      requiredChecks: [
-        'missing direct support',
-        'contradictory mechanism',
-      ],
+      requiredChecks: ['missing direct support', 'contradictory mechanism'],
       evidenceFor: [],
       evidenceAgainst: [],
       confidence: 0,

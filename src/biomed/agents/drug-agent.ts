@@ -10,15 +10,31 @@ import {
 } from '../types.js';
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function proteinKeywords(proteinId: string): string[] {
   const normalized = proteinId.trim().toUpperCase();
   const keywordMap: Array<[RegExp, string[]]> = [
-    [/^CACN/, ['calcium channel', 'voltage gated calcium channel', 'l type calcium channel']],
-    [/^ADRB/, ['adrenergic receptor', 'beta adrenergic receptor', 'adrenoceptor']],
-    [/^ADRA/, ['adrenergic receptor', 'alpha adrenergic receptor', 'adrenoceptor']],
+    [
+      /^CACN/,
+      [
+        'calcium channel',
+        'voltage gated calcium channel',
+        'l type calcium channel',
+      ],
+    ],
+    [
+      /^ADRB/,
+      ['adrenergic receptor', 'beta adrenergic receptor', 'adrenoceptor'],
+    ],
+    [
+      /^ADRA/,
+      ['adrenergic receptor', 'alpha adrenergic receptor', 'adrenoceptor'],
+    ],
     [/^AGTR/, ['angiotensin receptor']],
     [/^EGFR$/, ['epidermal growth factor receptor', 'egfr']],
     [/^MTOR$/, ['mtor', 'mechanistic target of rapamycin']],
@@ -71,12 +87,17 @@ function getPrimaryProteinId(sample: BiomedTaskSample): string | undefined {
 function detectDrugProteinSignal(
   textSummary: string,
   proteinId: string | undefined,
-): { stance: EvidenceItem['stance']; strength: EvidenceItem['strength']; claim: string } {
+): {
+  stance: EvidenceItem['stance'];
+  strength: EvidenceItem['strength'];
+  claim: string;
+} {
   if (!proteinId) {
     return {
       stance: 'insufficient',
       strength: 'weak',
-      claim: 'No protein was provided, so drug-protein mechanism alignment could not be checked.',
+      claim:
+        'No protein was provided, so drug-protein mechanism alignment could not be checked.',
     };
   }
 
@@ -155,7 +176,8 @@ export class DrugAgent {
         entityScope: proteinId ? [drugId, proteinId] : [drugId],
         claim:
           result.status === 'ok'
-            ? result.textSummary || `Drug researcher returned no summary for ${drugId}.`
+            ? result.textSummary ||
+              `Drug researcher returned no summary for ${drugId}.`
             : `Drug researcher failed for ${drugId}: ${result.error ?? 'unknown error'}`,
         stance: result.status === 'ok' ? 'insufficient' : 'contradicts',
         strength: result.status === 'ok' ? 'moderate' : 'weak',

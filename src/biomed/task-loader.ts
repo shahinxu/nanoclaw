@@ -54,10 +54,12 @@ export function getRelationshipStructure(
     },
   };
 
-  return structures[relationshipType] ?? {
-    entityTypes: ['unknown'],
-    isFixedOrder: true,
-  };
+  return (
+    structures[relationshipType] ?? {
+      entityTypes: ['unknown'],
+      isFixedOrder: true,
+    }
+  );
 }
 
 function parseCsvLine(line: string): string[] {
@@ -150,7 +152,9 @@ export class CsvTaskLoader implements TaskLoader {
       .readdirSync(this.options.dataDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && /^order_.*\.csv$/u.test(entry.name))
       .map((entry) => entry.name)
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+      .sort((left, right) =>
+        left.localeCompare(right, undefined, { numeric: true }),
+      );
 
     const samples: BiomedTaskSample[] = [];
     let sampleIndex = 0;
@@ -179,7 +183,8 @@ export class CsvTaskLoader implements TaskLoader {
           continue;
         }
 
-        const labelColumn = 'hyperedge_label' in row ? 'hyperedge_label' : 'label';
+        const labelColumn =
+          'hyperedge_label' in row ? 'hyperedge_label' : 'label';
         samples.push({
           sampleIndex,
           relationshipType: this.options.relationshipType,

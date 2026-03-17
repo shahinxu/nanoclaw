@@ -10,7 +10,10 @@ import {
 } from '../types.js';
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function diseaseKeywords(diseaseId: string | undefined): string[] {
@@ -20,8 +23,19 @@ function diseaseKeywords(diseaseId: string | undefined): string[] {
 
   const normalized = diseaseId.trim().toUpperCase();
   const keywordMap: Array<[RegExp, string[]]> = [
-    [/^MONDO:0005044$/, ['hypertension', 'hypertensive', 'blood pressure', 'arterial blood pressure']],
-    [/^MONDO:0005045$/, ['cardiac', 'heart', 'hypertrophic cardiomyopathy', 'myocard']],
+    [
+      /^MONDO:0005044$/,
+      [
+        'hypertension',
+        'hypertensive',
+        'blood pressure',
+        'arterial blood pressure',
+      ],
+    ],
+    [
+      /^MONDO:0005045$/,
+      ['cardiac', 'heart', 'hypertrophic cardiomyopathy', 'myocard'],
+    ],
   ];
 
   for (const [pattern, keywords] of keywordMap) {
@@ -63,18 +77,25 @@ function getPrimaryDiseaseId(sample: BiomedTaskSample): string | undefined {
 function detectProteinDiseaseSignal(
   textSummary: string,
   diseaseId: string | undefined,
-): { stance: EvidenceItem['stance']; strength: EvidenceItem['strength']; claim: string } {
+): {
+  stance: EvidenceItem['stance'];
+  strength: EvidenceItem['strength'];
+  claim: string;
+} {
   if (!diseaseId) {
     return {
       stance: 'insufficient',
       strength: 'weak',
-      claim: 'No disease was provided, so protein-disease relevance could not be checked.',
+      claim:
+        'No disease was provided, so protein-disease relevance could not be checked.',
     };
   }
 
   const searchable = normalizeText(textSummary);
   const keywords = diseaseKeywords(diseaseId);
-  const matchedKeyword = keywords.find((keyword) => searchable.includes(normalizeText(keyword)));
+  const matchedKeyword = keywords.find((keyword) =>
+    searchable.includes(normalizeText(keyword)),
+  );
 
   if (matchedKeyword) {
     return {
@@ -144,7 +165,8 @@ export class ProteinAgent {
         entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
         claim:
           result.status === 'ok'
-            ? result.textSummary || `Protein researcher returned no summary for ${proteinId}.`
+            ? result.textSummary ||
+              `Protein researcher returned no summary for ${proteinId}.`
             : `Protein researcher failed for ${proteinId}: ${result.error ?? 'unknown error'}`,
         stance: result.status === 'ok' ? 'insufficient' : 'contradicts',
         strength: result.status === 'ok' ? 'moderate' : 'weak',
