@@ -222,11 +222,15 @@ function pairOverlapCount(
     [query.drug, query.disease],
     [query.protein, query.disease],
   ];
-  return pairs.filter(([left, right]) => entitySet.has(left) && entitySet.has(right))
-    .length;
+  return pairs.filter(
+    ([left, right]) => entitySet.has(left) && entitySet.has(right),
+  ).length;
 }
 
-function frequencyBonus(entity: string, entityFrequency: Map<string, number>): number {
+function frequencyBonus(
+  entity: string,
+  entityFrequency: Map<string, number>,
+): number {
   const frequency = entityFrequency.get(entity) ?? 0;
   return 1 / Math.log(frequency + 2);
 }
@@ -240,19 +244,23 @@ function relationFocusBonus(relationship: string, focusUsed: string[]): number {
   let bonus = 0;
   if (
     /mechanism|target|pathway|protein|binding|module/u.test(text) &&
-    (relationship === 'protein_protein' || relationship === 'drug_protein_disease')
+    (relationship === 'protein_protein' ||
+      relationship === 'drug_protein_disease')
   ) {
     bonus += 1;
   }
   if (
     /disease|indication|alignment|treat|phenotype/u.test(text) &&
-    (relationship === 'drug_disease' || relationship === 'cell-line_disease' || relationship === 'drug_protein_disease')
+    (relationship === 'drug_disease' ||
+      relationship === 'cell-line_disease' ||
+      relationship === 'drug_protein_disease')
   ) {
     bonus += 1;
   }
   if (
     /cell|model|line|assay/u.test(text) &&
-    (relationship === 'drug_drug_cell-line' || relationship === 'cell-line_disease')
+    (relationship === 'drug_drug_cell-line' ||
+      relationship === 'cell-line_disease')
   ) {
     bonus += 0.7;
   }
@@ -306,7 +314,10 @@ function selectDiverseCandidates(
     selectedKeys.add(key);
   };
 
-  for (const candidate of (grouped.get(targetRelationshipType) ?? []).slice(0, 2)) {
+  for (const candidate of (grouped.get(targetRelationshipType) ?? []).slice(
+    0,
+    2,
+  )) {
     addCandidate(candidate);
   }
 
@@ -399,15 +410,14 @@ function deriveRetrievalSummary(
     (candidate) => candidate.bridgeToTargetCount >= 1,
   ).length;
 
-  const retrievalTier: SupportTier =
-    strongSameType
-      ? 'strong'
-      : bridgeRichCandidates >= 2 ||
-          (relationDiversity >= 2 && topCandidates[0]?.score >= 7)
-        ? 'moderate'
-        : topCandidates.length > 0
-          ? 'weak'
-          : 'insufficient';
+  const retrievalTier: SupportTier = strongSameType
+    ? 'strong'
+    : bridgeRichCandidates >= 2 ||
+        (relationDiversity >= 2 && topCandidates[0]?.score >= 7)
+      ? 'moderate'
+      : topCandidates.length > 0
+        ? 'weak'
+        : 'insufficient';
 
   const narratives: string[] = [];
   if (topCandidates.length > 0) {
@@ -428,25 +438,39 @@ function deriveRetrievalSummary(
     );
   }
 
-  if (topCandidates.some((candidate) => candidate.relationship === 'drug_disease')) {
+  if (
+    topCandidates.some((candidate) => candidate.relationship === 'drug_disease')
+  ) {
     narratives.push(
       'Auxiliary drug-disease edges add indication-level context, which is useful when direct triplet neighbors are sparse but disease alignment is still visible elsewhere in the graph.',
     );
   }
 
-  if (topCandidates.some((candidate) => candidate.relationship === 'protein_protein')) {
+  if (
+    topCandidates.some(
+      (candidate) => candidate.relationship === 'protein_protein',
+    )
+  ) {
     narratives.push(
       'Protein-protein edges add mechanism-side network context around the queried target instead of relying only on triplet co-occurrence counts.',
     );
   }
 
-  if (topCandidates.some((candidate) => candidate.relationship === 'cell-line_disease')) {
+  if (
+    topCandidates.some(
+      (candidate) => candidate.relationship === 'cell-line_disease',
+    )
+  ) {
     narratives.push(
       'Cell-line-disease edges contribute experimental model context for the queried disease, which is more biologically useful than generic disease-disease proximity.',
     );
   }
 
-  if (topCandidates.some((candidate) => candidate.relationship === 'drug_drug_sideeffect')) {
+  if (
+    topCandidates.some(
+      (candidate) => candidate.relationship === 'drug_drug_sideeffect',
+    )
+  ) {
     narratives.push(
       'Drug-drug-sideeffect edges add phenotype-level context around the drug and can surface pharmacology that a same-type triplet search would miss entirely.',
     );
@@ -464,7 +488,10 @@ function deriveRetrievalSummary(
 function deriveBiologicalNarratives(
   evidence: Omit<
     LocalGraphEvidence,
-    'supportTier' | 'biologicalNarratives' | 'localSupportTier' | 'retrievalTier'
+    | 'supportTier'
+    | 'biologicalNarratives'
+    | 'localSupportTier'
+    | 'retrievalTier'
   >,
   query: { drug: string; protein: string; disease: string },
 ): { supportTier: SupportTier; biologicalNarratives: string[] } {
@@ -664,9 +691,17 @@ export class LocalGraphTool {
           addToSetMap(index.drugsByProtein, triplet.protein, triplet.drug);
           addToSetMap(index.drugsByDisease, triplet.disease, triplet.drug);
           addToSetMap(index.proteinsByDrug, triplet.drug, triplet.protein);
-          addToSetMap(index.proteinsByDisease, triplet.disease, triplet.protein);
+          addToSetMap(
+            index.proteinsByDisease,
+            triplet.disease,
+            triplet.protein,
+          );
           addToSetMap(index.diseasesByDrug, triplet.drug, triplet.disease);
-          addToSetMap(index.diseasesByProtein, triplet.protein, triplet.disease);
+          addToSetMap(
+            index.diseasesByProtein,
+            triplet.protein,
+            triplet.disease,
+          );
           continue;
         }
 
@@ -679,7 +714,11 @@ export class LocalGraphTool {
           };
           const edgeId = index.drugDiseaseEdges.push(edge) - 1;
           addId(index.drugDiseaseByDrug, entities[0], edgeId);
-          addId(index.drugDiseaseByDisease, entities[entities.length - 1], edgeId);
+          addId(
+            index.drugDiseaseByDisease,
+            entities[entities.length - 1],
+            edgeId,
+          );
           continue;
         }
 
@@ -794,16 +833,22 @@ export class LocalGraphTool {
     ])) {
       addEdge(index.drugDiseaseEdges[edgeId]);
     }
-    for (const edgeId of new Set(index.proteinProteinByProtein.get(query.protein) ?? [])) {
+    for (const edgeId of new Set(
+      index.proteinProteinByProtein.get(query.protein) ?? [],
+    )) {
       addEdge(index.proteinProteinEdges[edgeId]);
     }
-    for (const edgeId of new Set(index.sideEffectByDrug.get(query.drug) ?? [])) {
+    for (const edgeId of new Set(
+      index.sideEffectByDrug.get(query.drug) ?? [],
+    )) {
       addEdge(index.sideEffectEdges[edgeId]);
     }
     for (const edgeId of new Set(index.cellLineByDrug.get(query.drug) ?? [])) {
       addEdge(index.cellLineEdges[edgeId]);
     }
-    for (const edgeId of new Set(index.cellLineDiseaseByDisease.get(query.disease) ?? [])) {
+    for (const edgeId of new Set(
+      index.cellLineDiseaseByDisease.get(query.disease) ?? [],
+    )) {
       addEdge(index.cellLineDiseaseEdges[edgeId]);
     }
 
@@ -841,7 +886,8 @@ export class LocalGraphTool {
         const pairBonus =
           candidate.relationship === this.relationshipType
             ? candidatePairOverlap * 2.4
-            : candidate.relationship === 'drug_disease' && candidatePairOverlap >= 1
+            : candidate.relationship === 'drug_disease' &&
+                candidatePairOverlap >= 1
               ? 1.8 + candidatePairOverlap
               : candidate.relationship === 'protein_protein'
                 ? 1.6
@@ -895,7 +941,8 @@ export class LocalGraphTool {
       .sort((left, right) => right.score - left.score);
 
     const maxCandidates =
-      typeof args.maxCandidates === 'number' && Number.isFinite(args.maxCandidates)
+      typeof args.maxCandidates === 'number' &&
+      Number.isFinite(args.maxCandidates)
         ? Math.max(3, Math.min(12, Math.trunc(args.maxCandidates)))
         : 8;
 

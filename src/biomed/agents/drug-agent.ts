@@ -61,9 +61,17 @@ function diseaseKeywords(diseaseId: string | undefined): string[] {
   const keywordMap: Array<[RegExp, string[]]> = [
     [
       /^MONDO:0005044$/,
-      ['hypertension', 'hypertensive', 'blood pressure', 'arterial blood pressure'],
+      [
+        'hypertension',
+        'hypertensive',
+        'blood pressure',
+        'arterial blood pressure',
+      ],
     ],
-    [/^MONDO:0005045$/, ['cardiac', 'heart', 'hypertrophic cardiomyopathy', 'myocard']],
+    [
+      /^MONDO:0005045$/,
+      ['cardiac', 'heart', 'hypertrophic cardiomyopathy', 'myocard'],
+    ],
   ];
 
   for (const [pattern, keywords] of keywordMap) {
@@ -161,12 +169,16 @@ function detectDrugProteinSignal(
     : [];
   const proteinKeywordHits = Array.isArray(targetedReview?.protein_keyword_hits)
     ? targetedReview?.protein_keyword_hits.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
-  const diseaseIndicationHits = Array.isArray(taskRelevance?.disease_indication_hits)
+  const diseaseIndicationHits = Array.isArray(
+    taskRelevance?.disease_indication_hits,
+  )
     ? taskRelevance?.disease_indication_hits.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
   const mechanismCount = Array.isArray(structured?.mechanism_of_action)
@@ -288,15 +300,18 @@ export class DrugAgent {
 
       const plannerAction: PlannerAction = {
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
-        hypothesisStatement: primaryHypothesisStatement(hypotheses, roundContext),
+        hypothesisStatement: primaryHypothesisStatement(
+          hypotheses,
+          roundContext,
+        ),
         verificationGoal:
           roundContext && roundContext.hypothesisFocus.length > 0
             ? `Round ${roundContext.roundNumber} hypothesis-driven re-check for drug ${drugId}: ${roundContext.hypothesisFocus.join(' | ')}`
             : roundContext && roundContext.focus.length > 0
               ? `Round ${roundContext.roundNumber} targeted re-check for drug ${drugId}: ${roundContext.focus.join(' | ')}`
-            : proteinId !== undefined
-              ? `Check whether drug ${drugId} has direct mechanism or target support involving protein ${proteinId}.`
-              : `Check whether drug ${drugId} has drug-side mechanism evidence relevant to the current sample.`,
+              : proteinId !== undefined
+                ? `Check whether drug ${drugId} has direct mechanism or target support involving protein ${proteinId}.`
+                : `Check whether drug ${drugId} has drug-side mechanism evidence relevant to the current sample.`,
         expectedEvidence: [
           'direct drug-target evidence',
           'mechanism-of-action description',
@@ -402,10 +417,9 @@ export class DrugAgent {
       role: 'drug',
       roundNumber: roundContext?.roundNumber ?? 1,
       summary,
-      hypothesesTouched:
-        roundContext?.activeHypothesisIds.length
-          ? roundContext.activeHypothesisIds
-          : hypotheses.map((hypothesis) => hypothesis.id),
+      hypothesesTouched: roundContext?.activeHypothesisIds.length
+        ? roundContext.activeHypothesisIds
+        : hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,
       evidenceItems,
       evaluationTrace,

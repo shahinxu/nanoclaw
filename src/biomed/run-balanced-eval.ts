@@ -87,7 +87,11 @@ function shuffleInPlace<T>(values: T[], seed: number): T[] {
   return values;
 }
 
-function balancedSample(samples: BiomedTaskSample[], sampleCount: number, seed: number): BiomedTaskSample[] {
+function balancedSample(
+  samples: BiomedTaskSample[],
+  sampleCount: number,
+  seed: number,
+): BiomedTaskSample[] {
   const positives = samples.filter((sample) => sample.groundTruth === 1);
   const negatives = samples.filter((sample) => sample.groundTruth === 0);
   const targetPerLabel = Math.floor(sampleCount / 2);
@@ -98,8 +102,14 @@ function balancedSample(samples: BiomedTaskSample[], sampleCount: number, seed: 
     );
   }
 
-  const sampledPositives = shuffleInPlace([...positives], seed).slice(0, targetPerLabel);
-  const sampledNegatives = shuffleInPlace([...negatives], seed + 1).slice(0, targetPerLabel);
+  const sampledPositives = shuffleInPlace([...positives], seed).slice(
+    0,
+    targetPerLabel,
+  );
+  const sampledNegatives = shuffleInPlace([...negatives], seed + 1).slice(
+    0,
+    targetPerLabel,
+  );
   return shuffleInPlace([...sampledPositives, ...sampledNegatives], seed + 2);
 }
 
@@ -127,7 +137,10 @@ function computeMetrics(results: WorkflowResult[]): EvalMetrics {
   const accuracy = total > 0 ? (tp + tn) / total : 0;
   const precision = tp + fp > 0 ? tp / (tp + fp) : 0;
   const recall = tp + fn > 0 ? tp / (tp + fn) : 0;
-  const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+  const f1 =
+    precision + recall > 0
+      ? (2 * precision * recall) / (precision + recall)
+      : 0;
 
   return { total, accuracy, precision, recall, f1, tp, tn, fp, fn };
 }

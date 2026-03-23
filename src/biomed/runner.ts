@@ -217,7 +217,10 @@ function selectActiveHypotheses(
   role: (typeof ALL_AGENT_ROLES)[number],
 ): HypothesisRecord[] {
   const openOrSupported = hypotheses.filter(
-    (item) => item.status === 'open' || item.status === 'supported' || item.status === 'insufficient',
+    (item) =>
+      item.status === 'open' ||
+      item.status === 'supported' ||
+      item.status === 'insufficient',
   );
   const keyword = roleKeyword(role);
   const roleSpecific = openOrSupported.filter((item) => {
@@ -232,8 +235,13 @@ function selectActiveHypotheses(
   });
 
   const prioritized = [
-    ...roleSpecific.sort((left, right) => (right.lastUpdatedRound ?? 0) - (left.lastUpdatedRound ?? 0)),
-    ...openOrSupported.filter((item) => !roleSpecific.some((candidate) => candidate.id === item.id)),
+    ...roleSpecific.sort(
+      (left, right) =>
+        (right.lastUpdatedRound ?? 0) - (left.lastUpdatedRound ?? 0),
+    ),
+    ...openOrSupported.filter(
+      (item) => !roleSpecific.some((candidate) => candidate.id === item.id),
+    ),
   ];
 
   return prioritized.slice(0, 3);

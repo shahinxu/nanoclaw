@@ -84,7 +84,10 @@ function reviseHypotheses(
     const next: HypothesisRecord = {
       ...hypothesis,
       evidenceFor: dedupe([...hypothesis.evidenceFor, ...supports]),
-      evidenceAgainst: dedupe([...hypothesis.evidenceAgainst, ...contradictions]),
+      evidenceAgainst: dedupe([
+        ...hypothesis.evidenceAgainst,
+        ...contradictions,
+      ]),
       lastUpdatedRound: round.roundNumber,
     };
 
@@ -121,19 +124,29 @@ function reviseHypotheses(
               : 'open';
       next.confidence = Math.max(
         0,
-        Math.min(1, contradictionCount * 0.25 + (positiveSupportCount === 0 ? 0.15 : 0)),
+        Math.min(
+          1,
+          contradictionCount * 0.25 + (positiveSupportCount === 0 ? 0.15 : 0),
+        ),
       );
       return next;
     }
 
-    const roleHints = round.disagreements.filter((item) => item.id === hypothesis.id.replace('H-alt-' + round.roundNumber + '-', ''));
+    const roleHints = round.disagreements.filter(
+      (item) =>
+        item.id ===
+        hypothesis.id.replace('H-alt-' + round.roundNumber + '-', ''),
+    );
     next.status =
       positiveSupportCount > 0 && round.disagreements.length > 0
         ? 'supported'
         : contradictionCount > 0 && roleHints.length === 0
           ? 'insufficient'
           : next.status;
-    next.confidence = Math.max(next.confidence, positiveSupportCount > 0 ? 0.35 : 0.2);
+    next.confidence = Math.max(
+      next.confidence,
+      positiveSupportCount > 0 ? 0.35 : 0.2,
+    );
     return next;
   });
 
@@ -143,9 +156,13 @@ function reviseHypotheses(
     .filter(
       (item) =>
         item.roundNumber >= 2 &&
-        (item.title.includes('mismatch') || item.title.includes('gap') || item.title.includes('contradiction')),
+        (item.title.includes('mismatch') ||
+          item.title.includes('gap') ||
+          item.title.includes('contradiction')),
     )
-    .map((item) => buildAlternativeHypothesis(round, item, positiveHypothesis?.id))
+    .map((item) =>
+      buildAlternativeHypothesis(round, item, positiveHypothesis?.id),
+    )
     .filter((item) => !existingIds.has(item.id));
 
   return [...revised, ...newAlternatives];

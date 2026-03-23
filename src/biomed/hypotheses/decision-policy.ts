@@ -254,7 +254,11 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
     };
   }
 
-  if (controlledAggressivePositive && multiRoleSupport >= 2 && votes.negativeVotes === 0) {
+  if (
+    controlledAggressivePositive &&
+    multiRoleSupport >= 2 &&
+    votes.negativeVotes === 0
+  ) {
     return {
       status: 'supported',
       decisionMode: 'settled',

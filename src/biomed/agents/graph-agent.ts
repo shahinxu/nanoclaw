@@ -38,39 +38,39 @@ export class GraphAgent {
     const protein = primaryEntity(sample, 'protein');
     const disease = primaryEntity(sample, 'disease');
     const plannerAction: PlannerAction = {
-        hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
-        hypothesisStatement:
-          roundContext?.hypothesisFocus[0] ??
-          hypotheses[0]?.statement ??
-          'The queried drug-protein-disease relationship exists.',
-        verificationGoal:
-          roundContext && roundContext.hypothesisFocus.length > 0
-            ? `Use neighboring hyperedges to test the active hypotheses: ${roundContext.hypothesisFocus.join(' | ')}`
-            : roundContext && roundContext.focus.length > 0
-              ? `Use neighboring hyperedges to probe unresolved graph structure: ${roundContext.focus.join(' | ')}`
+      hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
+      hypothesisStatement:
+        roundContext?.hypothesisFocus[0] ??
+        hypotheses[0]?.statement ??
+        'The queried drug-protein-disease relationship exists.',
+      verificationGoal:
+        roundContext && roundContext.hypothesisFocus.length > 0
+          ? `Use neighboring hyperedges to test the active hypotheses: ${roundContext.hypothesisFocus.join(' | ')}`
+          : roundContext && roundContext.focus.length > 0
+            ? `Use neighboring hyperedges to probe unresolved graph structure: ${roundContext.focus.join(' | ')}`
             : 'Use neighboring positive hyperedges to test whether the triplet sits inside a supportive local graph neighborhood.',
-        expectedEvidence: [
-          'shared drug-protein neighborhood',
-          'shared drug-disease neighborhood',
-          'shared protein-disease neighborhood',
-        ],
-        failureRule:
-          'Exclude the queried hyperedge itself and avoid treating missing neighbors as direct contradiction.',
-        toolCalls: [
-          {
-            tool: 'local_graph_tool',
-            arguments: {
-              drug,
-              protein,
-              disease,
-              roundNumber: roundContext?.roundNumber ?? 1,
-              focus: roundContext?.focus ?? [],
-              hypothesisFocus: roundContext?.hypothesisFocus ?? [],
-              maxCandidates: 8,
-            },
+      expectedEvidence: [
+        'shared drug-protein neighborhood',
+        'shared drug-disease neighborhood',
+        'shared protein-disease neighborhood',
+      ],
+      failureRule:
+        'Exclude the queried hyperedge itself and avoid treating missing neighbors as direct contradiction.',
+      toolCalls: [
+        {
+          tool: 'local_graph_tool',
+          arguments: {
+            drug,
+            protein,
+            disease,
+            roundNumber: roundContext?.roundNumber ?? 1,
+            focus: roundContext?.focus ?? [],
+            hypothesisFocus: roundContext?.hypothesisFocus ?? [],
+            maxCandidates: 8,
           },
-        ],
-      };
+        },
+      ],
+    };
     const plannerActions: PlannerAction[] = [plannerAction];
 
     const [result] = await executePlannerAction(plannerAction, {
@@ -117,7 +117,8 @@ export class GraphAgent {
       };
     } | null;
     const neighborhood = structured?.positiveNeighborhood;
-    const informativeHyperedgeRetrieval = structured?.informativeHyperedgeRetrieval;
+    const informativeHyperedgeRetrieval =
+      structured?.informativeHyperedgeRetrieval;
     const biologicalInterpretation = structured?.biologicalInterpretation;
     const pairSupportCount = neighborhood?.pairCoverageCount ?? 0;
     const supportScore = neighborhood?.supportScore ?? 0;
@@ -131,7 +132,9 @@ export class GraphAgent {
     const sharedProteinDiseaseCount =
       neighborhood?.sharedProteinDiseaseCount ?? 0;
     const supportTier =
-      biologicalInterpretation?.supportTier ?? neighborhood?.supportTier ?? 'insufficient';
+      biologicalInterpretation?.supportTier ??
+      neighborhood?.supportTier ??
+      'insufficient';
     const biologicalNarratives = biologicalInterpretation?.narratives ?? [];
     const topHyperedges = informativeHyperedgeRetrieval?.topCandidates ?? [];
 
@@ -232,10 +235,9 @@ export class GraphAgent {
       role: 'graph',
       roundNumber: roundContext?.roundNumber ?? 1,
       summary,
-      hypothesesTouched:
-        roundContext?.activeHypothesisIds.length
-          ? roundContext.activeHypothesisIds
-          : hypotheses.map((hypothesis) => hypothesis.id),
+      hypothesesTouched: roundContext?.activeHypothesisIds.length
+        ? roundContext.activeHypothesisIds
+        : hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,
       evidenceItems,
       evaluationTrace,

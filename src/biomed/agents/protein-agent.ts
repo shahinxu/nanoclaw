@@ -109,22 +109,30 @@ function detectProteinDiseaseSignal(
       : null;
   const diseaseKeywordHits = Array.isArray(targetedReview?.disease_keyword_hits)
     ? targetedReview?.disease_keyword_hits.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
-  const matchedProcesses = Array.isArray(taskRelevance?.matched_biological_processes)
+  const matchedProcesses = Array.isArray(
+    taskRelevance?.matched_biological_processes,
+  )
     ? taskRelevance?.matched_biological_processes.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
-  const matchedPathways = Array.isArray(taskRelevance?.matched_reactome_pathways)
+  const matchedPathways = Array.isArray(
+    taskRelevance?.matched_reactome_pathways,
+  )
     ? taskRelevance?.matched_reactome_pathways.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
   const biologicalProcesses = Array.isArray(structured?.biological_processes)
     ? structured.biological_processes.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
   const reactomePathways = Array.isArray(structured?.reactome_pathways)
@@ -146,7 +154,11 @@ function detectProteinDiseaseSignal(
     };
   }
 
-  if (diseaseKeywordHits.length > 0 || matchedPathways.length > 0 || matchedProcesses.length > 0) {
+  if (
+    diseaseKeywordHits.length > 0 ||
+    matchedPathways.length > 0 ||
+    matchedProcesses.length > 0
+  ) {
     return {
       stance: 'supports',
       strength: 'moderate',
@@ -232,13 +244,16 @@ export class ProteinAgent {
 
       const plannerAction: PlannerAction = {
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
-        hypothesisStatement: primaryHypothesisStatement(hypotheses, roundContext),
+        hypothesisStatement: primaryHypothesisStatement(
+          hypotheses,
+          roundContext,
+        ),
         verificationGoal: diseaseId
           ? roundContext && roundContext.hypothesisFocus.length > 0
             ? `Round ${roundContext.roundNumber} hypothesis-driven re-check for protein ${proteinId}: ${roundContext.hypothesisFocus.join(' | ')}`
             : roundContext && roundContext.focus.length > 0
               ? `Round ${roundContext.roundNumber} targeted re-check for protein ${proteinId}: ${roundContext.focus.join(' | ')}`
-            : `Check whether protein ${proteinId} has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
+              : `Check whether protein ${proteinId} has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
           : `Check whether protein ${proteinId} has disease-relevant evidence for the current sample.`,
         expectedEvidence: [
           'protein function summary',
@@ -344,10 +359,9 @@ export class ProteinAgent {
       role: 'protein',
       roundNumber: roundContext?.roundNumber ?? 1,
       summary,
-      hypothesesTouched:
-        roundContext?.activeHypothesisIds.length
-          ? roundContext.activeHypothesisIds
-          : hypotheses.map((hypothesis) => hypothesis.id),
+      hypothesesTouched: roundContext?.activeHypothesisIds.length
+        ? roundContext.activeHypothesisIds
+        : hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,
       evidenceItems,
       evaluationTrace,

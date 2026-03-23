@@ -109,14 +109,18 @@ function detectDiseaseProteinSignal(
   )
     ? targetedReview?.matched_associated_targets
     : [];
-  const matchedTreatmentTargets = Array.isArray(taskRelevance?.matched_treatment_targets)
+  const matchedTreatmentTargets = Array.isArray(
+    taskRelevance?.matched_treatment_targets,
+  )
     ? taskRelevance?.matched_treatment_targets.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
   const proteinKeywordHits = Array.isArray(taskRelevance?.protein_keyword_hits)
     ? taskRelevance?.protein_keyword_hits.filter(
-        (value): value is string => typeof value === 'string' && value.trim() !== '',
+        (value): value is string =>
+          typeof value === 'string' && value.trim() !== '',
       )
     : [];
   const associatedTargets = Array.isArray(structured?.associated_targets)
@@ -234,13 +238,16 @@ export class DiseaseAgent {
 
       const plannerAction: PlannerAction = {
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
-        hypothesisStatement: primaryHypothesisStatement(hypotheses, roundContext),
+        hypothesisStatement: primaryHypothesisStatement(
+          hypotheses,
+          roundContext,
+        ),
         verificationGoal: proteinId
           ? roundContext && roundContext.hypothesisFocus.length > 0
             ? `Round ${roundContext.roundNumber} hypothesis-driven re-check for disease ${diseaseId}: ${roundContext.hypothesisFocus.join(' | ')}`
             : roundContext && roundContext.focus.length > 0
               ? `Round ${roundContext.roundNumber} targeted re-check for disease ${diseaseId}: ${roundContext.focus.join(' | ')}`
-            : `Check whether disease ${diseaseId} provides context consistent with protein ${proteinId}, while keeping drug mechanism separate.`
+              : `Check whether disease ${diseaseId} provides context consistent with protein ${proteinId}, while keeping drug mechanism separate.`
           : `Check disease ${diseaseId} background and treatment context for the current sample.`,
         expectedEvidence: [
           'disease definition',
@@ -346,10 +353,9 @@ export class DiseaseAgent {
       role: 'disease',
       roundNumber: roundContext?.roundNumber ?? 1,
       summary,
-      hypothesesTouched:
-        roundContext?.activeHypothesisIds.length
-          ? roundContext.activeHypothesisIds
-          : hypotheses.map((hypothesis) => hypothesis.id),
+      hypothesesTouched: roundContext?.activeHypothesisIds.length
+        ? roundContext.activeHypothesisIds
+        : hypotheses.map((hypothesis) => hypothesis.id),
       plannerActions,
       evidenceItems,
       evaluationTrace,
