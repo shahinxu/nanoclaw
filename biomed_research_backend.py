@@ -53,6 +53,11 @@ def _text_contains_any(text: str, keywords: List[str]) -> List[str]:
     return [keyword for keyword in keywords if keyword.lower() in searchable]
 
 
+def _list_text(values: List[str], empty: str = 'none') -> str:
+    cleaned = [value for value in values if str(value).strip()]
+    return ', '.join(cleaned) if cleaned else empty
+
+
 def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[str]) -> str:
     if not review_context:
         return ''
@@ -69,6 +74,9 @@ def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[s
     peer_findings = _non_empty_strings(review_context.get('peerFindings'))
     if peer_findings:
         segments.append('Peer concerns carried into this review: ' + ' | '.join(peer_findings[:2]))
+    hypothesis_focus = _non_empty_strings(review_context.get('hypothesisFocus'))
+    if hypothesis_focus:
+        segments.append('Active hypotheses for this round: ' + ' | '.join(hypothesis_focus[:2]))
     if notes:
         segments.extend([note for note in notes if note])
     return ' '.join(segment for segment in segments if segment)
@@ -221,10 +229,21 @@ def _drug_researcher(
         term = indication.get('mesh_heading') or indication.get('efo_term')
         if isinstance(term, str) and term.strip() and term.strip() not in indication_terms:
             indication_terms.append(term.strip())
+    target_disease = str(review.get('targetDiseaseId') or '').strip() or None
+    disease_indication_hits = _text_contains_any(
+        ' '.join(indication_terms),
+        _disease_focus_keywords(target_disease),
+    ) if target_disease else []
     if indication_terms and str(review.get('focusMode') or '') != 'mechanism_only':
         summary_parts.append(
             'Reported clinical indications (from ChEMBL drug_indication; not task labels) include: '
             + ', '.join(indication_terms[:5])
+            + '.'
+        )
+    if target_disease and disease_indication_hits:
+        summary_parts.append(
+            f'Task-shaped review for disease {target_disease} found indication overlap: '
+            + ', '.join(disease_indication_hits[:5])
             + '.'
         )
 
@@ -232,6 +251,7 @@ def _drug_researcher(
         review,
         [
             f'Protein keyword hits in mechanism fields: {", ".join(protein_keyword_hits[:5])}.' if protein_keyword_hits else '',
+            f'Disease indication hits: {", ".join(disease_indication_hits[:5])}.' if disease_indication_hits else '',
             'Non-mechanism indication context was intentionally de-emphasized for this round.'
             if str(review.get('focusMode') or '') == 'mechanism_only' else '',
         ],
@@ -277,9 +297,23 @@ def _drug_researcher(
                 'focus_mode': review.get('focusMode'),
                 'focal_question': review.get('focalQuestion'),
                 'target_protein_id': target_protein,
+                'target_disease_id': target_disease,
                 'direct_mechanism_matches': direct_mechanism_matches,
                 'protein_keyword_hits': protein_keyword_hits,
                 'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
+            'task_relevance': {
+                'target_protein_id': target_protein,
+                'target_disease_id': target_disease,
+                'direct_target_match': bool(direct_mechanism_matches),
+                'protein_keyword_hits': protein_keyword_hits,
+                'disease_indication_hits': disease_indication_hits,
+                'mechanism_record_count': len(mechanisms),
+                'evidence_summary': (
+                    f'direct mechanism match to {target_protein}; disease indication overlap: {_list_text(disease_indication_hits)}'
+                    if direct_mechanism_matches else
+                    f'no direct mechanism match to {target_protein}; disease indication overlap: {_list_text(disease_indication_hits)}'
+                ),
             },
             'sources': [
                 {
@@ -420,6 +454,19 @@ def _protein_researcher(
     )
     if targeted_review:
         summary_parts.append(targeted_review)
+    matched_biological_processes = [
+        process for process in biological_processes
+        if _text_contains_any(process, _disease_focus_keywords(target_disease))
+    ] if target_disease else []
+    matched_reactome_pathways = [
+        str(pathway.get('pathway_name') or pathway.get('display_name') or '')
+        for pathway in reactome_pathways
+        if isinstance(pathway, dict)
+        and _text_contains_any(
+            str(pathway.get('pathway_name') or pathway.get('display_name') or ''),
+            _disease_focus_keywords(target_disease),
+        )
+    ] if target_disease else []
     if len(summary_parts) == 1:
         summary_parts.append('No additional UniProt or Reactome annotations were available.')
 
@@ -441,6 +488,15 @@ def _protein_researcher(
                 'target_disease_id': target_disease,
                 'disease_keyword_hits': disease_keyword_hits,
                 'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
+            'task_relevance': {
+                'target_disease_id': target_disease,
+                'disease_keyword_hits': disease_keyword_hits,
+                'matched_biological_processes': matched_biological_processes,
+                'matched_reactome_pathways': matched_reactome_pathways,
+                'evidence_summary': (
+                    f'disease keyword hits: {_list_text(disease_keyword_hits)}; matched processes: {_list_text(matched_biological_processes)}; matched pathways: {_list_text(matched_reactome_pathways)}'
+                ),
             },
             'sources': [
                 {
@@ -527,6 +583,24 @@ def _disease_researcher(
         if isinstance(row, dict)
         and str(row.get('approved_symbol') or '').strip().upper() == str(target_protein or '').upper()
     ]
+    matched_treatment_targets = [
+        str(row.get('approved_symbol') or '').strip()
+        for row in standard_treatments
+        if isinstance(row, dict)
+        and str(row.get('approved_symbol') or '').strip().upper() == str(target_protein or '').upper()
+    ]
+    protein_keyword_hits = _text_contains_any(
+        ' '.join([
+            str(name or ''),
+            str(definition or ''),
+            ' '.join([
+                str(item.get('name') or item.get('id') or '')
+                for item in classification
+                if isinstance(item, dict)
+            ]),
+        ]),
+        _protein_focus_keywords(target_protein),
+    ) if target_protein else []
 
     if not name and not definition and not associated_targets and not standard_treatments:
         return {
@@ -594,12 +668,18 @@ def _disease_researcher(
             ])
             + '.'
         )
+    if matched_treatment_targets:
+        summary_parts.append(
+            f'Task-shaped review found treatment rows that reuse queried protein {target_protein} as a named target.'
+        )
 
     targeted_review = _build_targeted_review_summary(
         review,
         [
             f'Explicit associated-target match for queried protein: {target_protein}.'
             if matched_targets and target_protein else '',
+            f'Known treatment rows also reference queried protein {target_protein}.'
+            if matched_treatment_targets and target_protein else '',
             f'Queried protein {target_protein} was absent from the returned associated-target list.'
             if target_protein and not matched_targets and str(review.get('focusMode') or '') == 'target_alignment' else '',
         ],
@@ -637,6 +717,15 @@ def _disease_researcher(
                 'target_protein_id': target_protein,
                 'matched_associated_targets': matched_targets,
                 'peer_findings': _non_empty_strings(review.get('peerFindings')),
+            },
+            'task_relevance': {
+                'target_protein_id': target_protein,
+                'matched_associated_targets': matched_targets,
+                'matched_treatment_targets': matched_treatment_targets,
+                'protein_keyword_hits': protein_keyword_hits,
+                'evidence_summary': (
+                    f'associated-target match count: {len(matched_targets)}; treatment-target matches: {_list_text(matched_treatment_targets)}; protein keyword hits: {_list_text(protein_keyword_hits)}'
+                ),
             },
         },
     }

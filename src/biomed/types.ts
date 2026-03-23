@@ -26,6 +26,10 @@ export interface HypothesisRecord {
   evidenceFor: string[];
   evidenceAgainst: string[];
   confidence: number;
+  createdRound?: number;
+  lastUpdatedRound?: number;
+  derivedFromId?: string;
+  revisionReason?: string;
 }
 
 export type EvidenceStance = 'supports' | 'contradicts' | 'insufficient';
@@ -75,6 +79,8 @@ export interface ResearchReviewContext {
   focalQuestion?: string;
   focus: string[];
   peerFindings: string[];
+  hypothesisFocus?: string[];
+  activeHypothesisIds?: string[];
   targetDrugId?: string;
   targetProteinId?: string;
   targetDiseaseId?: string;
@@ -139,6 +145,8 @@ export interface AgentRoundContext {
   disagreements: RoundDisagreement[];
   priorRoundSummaries: string[];
   peerAssessmentSummaries: string[];
+  hypothesisFocus: string[];
+  activeHypothesisIds: string[];
 }
 
 export interface AgentAssessment {
@@ -168,6 +176,7 @@ export interface SampleRoundRecord {
   disagreements: RoundDisagreement[];
   assessments: AgentAssessment[];
   evidenceItems: EvidenceItem[];
+  hypothesisSnapshot: HypothesisRecord[];
   summary: string;
 }
 

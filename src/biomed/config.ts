@@ -20,7 +20,7 @@ export const DEFAULT_BIOMED_CONFIG: BiomedWorkflowConfig = {
   openRouterApiKeyPath: '/home/zhx/drug_agent/openrouter_api_key.txt',
   openRouterBaseUrl: 'https://openrouter.ai/api/v1',
   expertJudgeModel: 'openai/gpt-4o-mini',
-  enableExpertJudge: true,
+  enableExpertJudge: false,
   relationshipType: 'drug_protein_disease',
   maxRounds: 5,
   writeTrace: true,

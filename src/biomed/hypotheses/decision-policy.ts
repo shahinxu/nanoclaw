@@ -17,10 +17,24 @@ interface SupportSummary {
   proteinSupports: number;
   diseaseSupports: number;
   graphSupports: number;
+  drugWeakSupports: number;
+  proteinWeakSupports: number;
+  diseaseWeakSupports: number;
+  graphWeakSupports: number;
+  drugModerateOrStrongSupports: number;
+  proteinModerateOrStrongSupports: number;
+  diseaseModerateOrStrongSupports: number;
   graphStrongSupports: number;
   graphModerateSupports: number;
   contradictions: EvidenceItem[];
   allEvidence: EvidenceItem[];
+}
+
+interface AgentVoteSummary {
+  positiveVotes: number;
+  negativeVotes: number;
+  abstentions: number;
+  byRole: Record<string, 0 | 1 | null>;
 }
 
 function collectEvidence(assessments: AgentAssessment[]): EvidenceItem[] {
@@ -40,6 +54,48 @@ function summarizeSupport(evidenceItems: EvidenceItem[]): SupportSummary {
     ).length,
     graphSupports: evidenceItems.filter(
       (item) => item.stance === 'supports' && item.source === 'graph_agent',
+    ).length,
+    drugWeakSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'drug_agent' &&
+        item.strength === 'weak',
+    ).length,
+    proteinWeakSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'protein_agent' &&
+        item.strength === 'weak',
+    ).length,
+    diseaseWeakSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'disease_agent' &&
+        item.strength === 'weak',
+    ).length,
+    graphWeakSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'graph_agent' &&
+        item.strength === 'weak',
+    ).length,
+    drugModerateOrStrongSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'drug_agent' &&
+        item.strength !== 'weak',
+    ).length,
+    proteinModerateOrStrongSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'protein_agent' &&
+        item.strength !== 'weak',
+    ).length,
+    diseaseModerateOrStrongSupports: evidenceItems.filter(
+      (item) =>
+        item.stance === 'supports' &&
+        item.source === 'disease_agent' &&
+        item.strength !== 'weak',
     ).length,
     graphStrongSupports: evidenceItems.filter(
       (item) =>
@@ -67,7 +123,7 @@ function buildRationale(
   const clauses: string[] = [];
 
   clauses.push(
-    `Expert support counts: drug=${summary.drugSupports}, protein=${summary.proteinSupports}, disease=${summary.diseaseSupports}, graph=${summary.graphSupports} (strong=${summary.graphStrongSupports}, moderate=${summary.graphModerateSupports}).`,
+    `Expert support counts: drug=${summary.drugSupports} (weak=${summary.drugWeakSupports}), protein=${summary.proteinSupports} (weak=${summary.proteinWeakSupports}), disease=${summary.diseaseSupports} (weak=${summary.diseaseWeakSupports}), graph=${summary.graphSupports} (weak=${summary.graphWeakSupports}, strong=${summary.graphStrongSupports}, moderate=${summary.graphModerateSupports}).`,
   );
 
   if (summary.contradictions.length > 0) {
@@ -83,26 +139,76 @@ function buildRationale(
   return clauses.join(' ');
 }
 
-function majorityFallbackLabel(summary: SupportSummary): 0 | 1 {
-  const supportVotes = [
-    summary.drugSupports > 0 ? 1 : 0,
-    summary.proteinSupports > 0 ? 1 : 0,
-    summary.diseaseSupports > 0 ? 1 : 0,
-    summary.graphSupports > 0 ? 1 : 0,
-  ].reduce((count, value) => count + value, 0);
+function summarizeVotes(assessments: AgentAssessment[]): AgentVoteSummary {
+  const roles: Array<AgentAssessment['role']> = [
+    'drug',
+    'protein',
+    'disease',
+    'graph',
+  ];
+  const byRole: Record<string, 0 | 1 | null> = {};
 
-  return supportVotes >= 2 ? 1 : 0;
+  for (const role of roles) {
+    const assessment = assessments.find((item) => item.role === role);
+    if (!assessment) {
+      byRole[role] = null;
+      continue;
+    }
+
+    const supports = assessment.evidenceItems.filter(
+      (item) => item.stance === 'supports',
+    ).length;
+    const contradicts = assessment.evidenceItems.filter(
+      (item) => item.stance === 'contradicts',
+    ).length;
+
+    if (supports === 0 && contradicts === 0) {
+      byRole[role] = null;
+    } else {
+      byRole[role] = supports >= contradicts ? 1 : 0;
+    }
+  }
+
+  const votes = Object.values(byRole);
+  return {
+    positiveVotes: votes.filter((vote) => vote === 1).length,
+    negativeVotes: votes.filter((vote) => vote === 0).length,
+    abstentions: votes.filter((vote) => vote === null).length,
+    byRole,
+  };
+}
+
+function hasBioSideSupport(summary: SupportSummary): boolean {
+  return (
+    summary.proteinSupports > 0 ||
+    summary.diseaseSupports > 0 ||
+    summary.graphSupports > 0
+  );
+}
+
+function hasBioSideModerateSupport(summary: SupportSummary): boolean {
+  return (
+    summary.proteinModerateOrStrongSupports > 0 ||
+    summary.diseaseModerateOrStrongSupports > 0 ||
+    summary.graphModerateSupports > 0 ||
+    summary.graphStrongSupports > 0
+  );
+}
+
+function countRolesWithSupport(summary: SupportSummary): number {
+  return [
+    summary.drugSupports,
+    summary.proteinSupports,
+    summary.diseaseSupports,
+    summary.graphSupports,
+  ].filter((count) => count > 0).length;
 }
 
 export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
   const evidenceItems = collectEvidence(input.assessments);
   const summary = summarizeSupport(evidenceItems);
+  const votes = summarizeVotes(input.assessments);
   const blockingGaps: string[] = [];
-  const totalSupports =
-    summary.drugSupports +
-    summary.proteinSupports +
-    summary.diseaseSupports +
-    summary.graphSupports;
   const contradictionClaims = summary.contradictions.map((item) => item.claim);
 
   if (summary.drugSupports === 0) {
@@ -118,81 +224,74 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
   }
 
   if (summary.contradictions.length > 0) {
+    blockingGaps.push(
+      `Agent vote split: positive=${votes.positiveVotes}, negative=${votes.negativeVotes}, abstain=${votes.abstentions}.`,
+    );
+  }
+
+  const voteMargin = Math.abs(votes.positiveVotes - votes.negativeVotes);
+  const majorityLabel: 0 | 1 =
+    votes.positiveVotes > votes.negativeVotes ? 1 : 0;
+  const multiRoleSupport = countRolesWithSupport(summary);
+  const controlledAggressivePositive =
+    summary.drugSupports > 0 &&
+    hasBioSideSupport(summary) &&
+    summary.contradictions.length === 0;
+  const strongerControlledPositive =
+    summary.drugModerateOrStrongSupports > 0 &&
+    hasBioSideModerateSupport(summary) &&
+    summary.contradictions.length <= 1;
+
+  if (strongerControlledPositive) {
     return {
-      status: 'refuted',
+      status: 'supported',
       decisionMode: 'settled',
-      label: 0,
-      confidence: 0.75,
-      rationale: buildRationale(summary, blockingGaps),
+      label: 1,
+      confidence: 0.74,
+      rationale: `${buildRationale(summary, blockingGaps)} Controlled-aggressive rule triggered because drug-side support reached moderate-or-strong evidence and at least one biological side also provided non-weak support.`,
+      blockingGaps,
+      contradictions: contradictionClaims,
+    };
+  }
+
+  if (controlledAggressivePositive && multiRoleSupport >= 2 && votes.negativeVotes === 0) {
+    return {
+      status: 'supported',
+      decisionMode: 'settled',
+      label: 1,
+      confidence: 0.66,
+      rationale: `${buildRationale(summary, blockingGaps)} Controlled-aggressive rule triggered because drug-side support plus at least one biological-side support formed a closed weak evidence chain without negative votes.`,
+      blockingGaps,
+      contradictions: contradictionClaims,
+    };
+  }
+
+  if (votes.positiveVotes !== votes.negativeVotes) {
+    return {
+      status: majorityLabel === 1 ? 'supported' : 'refuted',
+      decisionMode: 'settled',
+      label: majorityLabel,
+      confidence: 0.5 + Math.min(voteMargin, 2) * 0.1,
+      rationale: `${buildRationale(summary, blockingGaps)} Majority vote across agents: ${JSON.stringify(votes.byRole)}.`,
       blockingGaps,
       contradictions: contradictionClaims,
     };
   }
 
   if (
+    votes.positiveVotes === votes.negativeVotes &&
     summary.drugSupports > 0 &&
-    summary.proteinSupports > 0 &&
-    summary.diseaseSupports > 0
+    (summary.proteinSupports > 0 || summary.diseaseSupports > 0) &&
+    votes.negativeVotes <= 1
   ) {
     return {
       status: 'supported',
       decisionMode: 'settled',
       label: 1,
-      confidence: 0.75,
-      rationale: buildRationale(summary, blockingGaps),
+      confidence: 0.58,
+      rationale: `${buildRationale(summary, blockingGaps)} Positive tie-break triggered because drug support co-occurred with at least one biological-side support, and the graph side did not contribute a strong contrary signal.`,
       blockingGaps,
-      contradictions: [],
-    };
-  }
-
-  if (
-    summary.graphSupports > 0 &&
-    [
-      summary.drugSupports,
-      summary.proteinSupports,
-      summary.diseaseSupports,
-    ].filter((count) => count > 0).length >= 2
-  ) {
-    return {
-      status: 'supported',
-      decisionMode: 'settled',
-      label: 1,
-      confidence: 0.7,
-      rationale: `${buildRationale(summary, blockingGaps)} Graph neighborhood evidence supplies an additional structural bridge, so the positive decision is treated as settled.`,
-      blockingGaps,
-      contradictions: [],
-    };
-  }
-
-  if (
-    summary.graphStrongSupports > 0 &&
-    [
-      summary.drugSupports,
-      summary.proteinSupports,
-      summary.diseaseSupports,
-    ].filter((count) => count > 0).length >= 1
-  ) {
-    return {
-      status: 'supported',
-      decisionMode: 'settled',
-      label: 1,
-      confidence: 0.72,
-      rationale: `${buildRationale(summary, blockingGaps)} Strong graph evidence supplies a high-confidence structural bridge, and at least one domain expert also supports the triplet, so the decision is promoted to settled positive.`,
-      blockingGaps,
-      contradictions: [],
-    };
-  }
-
-  if (totalSupports > 0) {
-    const fallbackLabel = majorityFallbackLabel(summary);
-    return {
-      status: 'insufficient',
-      decisionMode: 'best-effort-insufficient',
-      label: fallbackLabel,
-      confidence: 0.45,
-      rationale: `${buildRationale(summary, blockingGaps)} Current evidence remains insufficient for a settled positive or negative decision. A symmetric best-effort export label of ${fallbackLabel} is returned for compatibility, but debate and targeted evidence collection should continue.`,
-      blockingGaps,
-      contradictions: [],
+      contradictions: contradictionClaims,
     };
   }
 
@@ -201,10 +300,10 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
       status: 'insufficient',
       decisionMode: 'best-effort-insufficient',
       label: 0,
-      confidence: 0.25,
-      rationale: `${buildRationale(summary, blockingGaps)} Evidence was collected, but it does not yet justify a settled positive or negative decision. A best-effort export label of 0 is returned because no majority support emerged, but debate and evidence collection should continue.`,
+      confidence: 0.3,
+      rationale: `${buildRationale(summary, blockingGaps)} Agent votes are tied (${JSON.stringify(votes.byRole)}), so no majority emerged. A compatibility label of 0 is returned for the tie case.`,
       blockingGaps,
-      contradictions: [],
+      contradictions: contradictionClaims,
     };
   }
 

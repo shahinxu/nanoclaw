@@ -11,14 +11,13 @@ import {
 } from './hypotheses/state.js';
 import { NoopTraceWriter, type TraceWriter } from './trace-writer.js';
 import { CsvTaskLoader, type TaskLoader } from './task-loader.js';
-import { OpenRouterExpertJudge } from './tools/expert-judge.js';
 import { LocalGraphTool } from './tools/local-graph-tool.js';
 import { PythonResearchToolAdapter } from './tools/python-researcher-adapter.js';
 import {
   AgentAssessment,
   AgentRoundContext,
   BiomedTaskSample,
-  ExpertJudge,
+  HypothesisRecord,
   ResearchToolAdapter,
   RoundDisagreement,
   SampleTraceRecord,
@@ -193,12 +192,60 @@ function createRoundSummary(
   return `Round ${roundNumber}: supports=${supports}, contradictions=${contradictions}, unresolved_disagreements=${disagreements.length}.`;
 }
 
+function hypothesisFocusText(hypothesis: HypothesisRecord): string {
+  const checks = hypothesis.requiredChecks.slice(0, 2).join(' | ');
+  return checks
+    ? `${hypothesis.statement} Checks: ${checks}.`
+    : hypothesis.statement;
+}
+
+function roleKeyword(role: (typeof ALL_AGENT_ROLES)[number]): string {
+  if (role === 'drug') {
+    return 'drug';
+  }
+  if (role === 'protein') {
+    return 'protein';
+  }
+  if (role === 'disease') {
+    return 'disease';
+  }
+  return 'mechanism';
+}
+
+function selectActiveHypotheses(
+  hypotheses: HypothesisRecord[],
+  role: (typeof ALL_AGENT_ROLES)[number],
+): HypothesisRecord[] {
+  const openOrSupported = hypotheses.filter(
+    (item) => item.status === 'open' || item.status === 'supported' || item.status === 'insufficient',
+  );
+  const keyword = roleKeyword(role);
+  const roleSpecific = openOrSupported.filter((item) => {
+    const haystack = [
+      item.statement,
+      item.revisionReason ?? '',
+      ...item.requiredChecks,
+    ]
+      .join(' ')
+      .toLowerCase();
+    return haystack.includes(keyword);
+  });
+
+  const prioritized = [
+    ...roleSpecific.sort((left, right) => (right.lastUpdatedRound ?? 0) - (left.lastUpdatedRound ?? 0)),
+    ...openOrSupported.filter((item) => !roleSpecific.some((candidate) => candidate.id === item.id)),
+  ];
+
+  return prioritized.slice(0, 3);
+}
+
 function buildRoundContext(
   role: (typeof ALL_AGENT_ROLES)[number],
   roundNumber: number,
   maxRounds: number,
   rounds: SampleRoundRecord[],
   unresolvedDisagreements: RoundDisagreement[],
+  hypotheses: HypothesisRecord[],
 ): AgentRoundContext {
   const roleDisagreements =
     role === 'graph'
@@ -207,6 +254,7 @@ function buildRoundContext(
           item.affectedRoles.includes(role),
         );
   const previousRound = rounds.at(-1);
+  const activeHypotheses = selectActiveHypotheses(hypotheses, role);
 
   return {
     roundNumber,
@@ -220,6 +268,8 @@ function buildRoundContext(
       previousRound?.assessments
         .filter((assessment) => assessment.role !== role)
         .map((assessment) => `${assessment.role}: ${assessment.summary}`) ?? [],
+    hypothesisFocus: activeHypotheses.map(hypothesisFocusText),
+    activeHypothesisIds: activeHypotheses.map((item) => item.id),
   };
 }
 
@@ -239,7 +289,6 @@ export interface WorkflowDependencies {
   traceWriter?: TraceWriter;
   taskLoader?: TaskLoader;
   toolAdapter?: ResearchToolAdapter;
-  expertJudge?: ExpertJudge;
 }
 
 export class BiomedWorkflowRunner {
@@ -247,7 +296,6 @@ export class BiomedWorkflowRunner {
   private readonly traceWriter: TraceWriter;
   private readonly taskLoader: TaskLoader;
   private readonly toolAdapter: ResearchToolAdapter;
-  private readonly expertJudge: ExpertJudge | null;
 
   constructor(
     config: Partial<BiomedWorkflowConfig> = {},
@@ -263,9 +311,6 @@ export class BiomedWorkflowRunner {
       });
     this.toolAdapter =
       deps.toolAdapter ?? new PythonResearchToolAdapter(this.config);
-    this.expertJudge = this.config.enableExpertJudge
-      ? (deps.expertJudge ?? new OpenRouterExpertJudge(this.config))
-      : null;
   }
 
   async loadSamples(limit?: number): Promise<BiomedTaskSample[]> {
@@ -282,12 +327,11 @@ export class BiomedWorkflowRunner {
   }
 
   async runSample(sample: BiomedTaskSample): Promise<WorkflowResult> {
-    const hypotheses = generateInitialHypotheses(sample);
-    let state = createHypothesisState(hypotheses);
+    let state = createHypothesisState(generateInitialHypotheses(sample));
 
-    const drugAgent = new DrugAgent(this.toolAdapter, this.expertJudge);
-    const proteinAgent = new ProteinAgent(this.toolAdapter, this.expertJudge);
-    const diseaseAgent = new DiseaseAgent(this.toolAdapter, this.expertJudge);
+    const drugAgent = new DrugAgent(this.toolAdapter);
+    const proteinAgent = new ProteinAgent(this.toolAdapter);
+    const diseaseAgent = new DiseaseAgent(this.toolAdapter);
     const graphAgent = new GraphAgent(
       new LocalGraphTool(
         this.config.graphDataDir,
@@ -304,46 +348,50 @@ export class BiomedWorkflowRunner {
     ) {
       const drugAssessment = await drugAgent.assess(
         sample,
-        hypotheses,
+        state.hypotheses,
         buildRoundContext(
           'drug',
           roundNumber,
           this.config.maxRounds,
           state.rounds,
           state.unresolvedDisagreements,
+          state.hypotheses,
         ),
       );
       const proteinAssessment = await proteinAgent.assess(
         sample,
-        hypotheses,
+        state.hypotheses,
         buildRoundContext(
           'protein',
           roundNumber,
           this.config.maxRounds,
           state.rounds,
           state.unresolvedDisagreements,
+          state.hypotheses,
         ),
       );
       const diseaseAssessment = await diseaseAgent.assess(
         sample,
-        hypotheses,
+        state.hypotheses,
         buildRoundContext(
           'disease',
           roundNumber,
           this.config.maxRounds,
           state.rounds,
           state.unresolvedDisagreements,
+          state.hypotheses,
         ),
       );
       const graphAssessment = await graphAgent.assess(
         sample,
-        hypotheses,
+        state.hypotheses,
         buildRoundContext(
           'graph',
           roundNumber,
           this.config.maxRounds,
           state.rounds,
           state.unresolvedDisagreements,
+          state.hypotheses,
         ),
       );
 
@@ -367,6 +415,7 @@ export class BiomedWorkflowRunner {
         evidenceItems: latestAssessments.flatMap(
           (assessment) => assessment.evidenceItems,
         ),
+        hypothesisSnapshot: state.hypotheses.map((item) => ({ ...item })),
         summary: createRoundSummary(
           roundNumber,
           latestAssessments,
@@ -382,7 +431,7 @@ export class BiomedWorkflowRunner {
 
     const decision = arbiter.decide({
       sample,
-      hypotheses,
+      hypotheses: state.hypotheses,
       assessments: latestAssessments,
       config: this.config,
     });
@@ -392,7 +441,7 @@ export class BiomedWorkflowRunner {
       relationshipType: sample.relationshipType,
       entityDict: sample.entityDict,
       groundTruth: sample.groundTruth,
-      hypotheses,
+      hypotheses: state.hypotheses,
       rounds: state.rounds,
       assessments: latestAssessments,
       evidenceItems: latestAssessments.flatMap(

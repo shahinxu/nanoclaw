@@ -17,6 +17,8 @@ export function generateInitialHypotheses(
       evidenceFor: [],
       evidenceAgainst: [],
       confidence: 0,
+      createdRound: 0,
+      lastUpdatedRound: 0,
     },
     {
       id: `H-negative-${sample.sampleIndex}`,
@@ -28,6 +30,8 @@ export function generateInitialHypotheses(
       evidenceFor: [],
       evidenceAgainst: [],
       confidence: 0,
+      createdRound: 0,
+      lastUpdatedRound: 0,
     },
   ];
 }
