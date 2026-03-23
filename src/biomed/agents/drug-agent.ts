@@ -382,10 +382,7 @@ export class DrugAgent {
         },
         entityScope: proteinId ? [drugId, proteinId] : [drugId],
         rawToolOutput: result,
-        judgeOutput: null,
-        heuristicOutput: heuristicSignal,
-        finalOutput: mechanismSignal,
-        finalSource: 'heuristic',
+        interpretedOutput: mechanismSignal,
       });
 
       evidenceItems.push({

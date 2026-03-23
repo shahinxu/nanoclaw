@@ -93,38 +93,17 @@ export interface ResearchToolAdapter {
   ): Promise<ResearchToolResult>;
 }
 
-export interface ExpertJudgeResult {
-  stance: EvidenceStance;
-  strength: EvidenceStrength;
-  claim: string;
-  rawResponse?: string;
-}
-
-export interface ExpertJudgeInput {
-  agentRole: 'drug' | 'protein' | 'disease';
-  sample: BiomedTaskSample;
-  hypothesis: HypothesisRecord | undefined;
-  roundContext?: AgentRoundContext;
-  toolName: string;
-  toolArguments: Record<string, unknown>;
-  toolResult: ResearchToolResult;
-}
-
-export interface ExpertJudge {
-  judge(input: ExpertJudgeInput): Promise<ExpertJudgeResult>;
-}
-
 export interface AgentEvaluationTrace {
   id: string;
   toolName: string;
   toolArguments: Record<string, unknown>;
   entityScope: string[];
   rawToolOutput: ResearchToolResult;
-  judgeOutput: ExpertJudgeResult | null;
-  judgeError?: string;
-  heuristicOutput: ExpertJudgeResult;
-  finalOutput: ExpertJudgeResult;
-  finalSource: 'judge' | 'heuristic';
+  interpretedOutput: {
+    stance: EvidenceStance;
+    strength: EvidenceStrength;
+    claim: string;
+  };
 }
 
 export interface RoundDisagreement {

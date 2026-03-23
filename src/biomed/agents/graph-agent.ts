@@ -188,10 +188,7 @@ export class GraphAgent {
         },
         entityScope,
         rawToolOutput: result,
-        judgeOutput: null,
-        heuristicOutput: finalOutput,
-        finalOutput,
-        finalSource: 'heuristic',
+        interpretedOutput: finalOutput,
       },
     ];
 

@@ -318,10 +318,7 @@ export class DiseaseAgent {
         },
         entityScope: proteinId ? [diseaseId, proteinId] : [diseaseId],
         rawToolOutput: result,
-        judgeOutput: null,
-        heuristicOutput: heuristicSignal,
-        finalOutput: diseaseSignal,
-        finalSource: 'heuristic',
+        interpretedOutput: diseaseSignal,
       });
 
       evidenceItems.push({
