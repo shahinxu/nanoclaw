@@ -14,7 +14,10 @@ function isAbsenceOnlySummary(summary: string): boolean {
 }
 
 export function isInformativeToolResult(
-  result: Pick<ResearchToolResult, 'toolName' | 'status' | 'textSummary' | 'structured'>,
+  result: Pick<
+    ResearchToolResult,
+    'toolName' | 'status' | 'textSummary' | 'structured'
+  >,
 ): boolean {
   if (result.status !== 'ok') {
     return false;
@@ -34,13 +37,19 @@ export function isInformativeToolResult(
 }
 
 export function getInformativeToolSummary(
-  result: Pick<ResearchToolResult, 'toolName' | 'status' | 'textSummary' | 'structured'>,
+  result: Pick<
+    ResearchToolResult,
+    'toolName' | 'status' | 'textSummary' | 'structured'
+  >,
 ): string {
   return isInformativeToolResult(result) ? result.textSummary.trim() : '';
 }
 
 export function getInformativeToolStructured(
-  result: Pick<ResearchToolResult, 'toolName' | 'status' | 'textSummary' | 'structured'>,
+  result: Pick<
+    ResearchToolResult,
+    'toolName' | 'status' | 'textSummary' | 'structured'
+  >,
 ): Record<string, unknown> | null {
   return isInformativeToolResult(result) ? result.structured : null;
 }

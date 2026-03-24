@@ -40,7 +40,9 @@ export function generateInitialHypotheses(
       depth: 0,
       frontier: false,
       dependencyMode: 'all',
-      requiredChecks: ['evaluate the positive root before settling the negative root'],
+      requiredChecks: [
+        'evaluate the positive root before settling the negative root',
+      ],
       evidenceFor: [],
       evidenceAgainst: [],
       confidence: 0,

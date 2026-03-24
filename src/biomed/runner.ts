@@ -13,7 +13,11 @@ import { NoopTraceWriter, type TraceWriter } from './trace-writer.js';
 import { CsvTaskLoader, type TaskLoader } from './task-loader.js';
 import { LocalGraphTool } from './tools/local-graph-tool.js';
 import { PythonResearchToolAdapter } from './tools/python-researcher-adapter.js';
-import { ALL_AGENT_ROLES, BIOMED_ROLES, SOURCE_BY_ROLE } from './agent-constants.js';
+import {
+  ALL_AGENT_ROLES,
+  BIOMED_ROLES,
+  SOURCE_BY_ROLE,
+} from './agent-constants.js';
 import { summarizePeerAssessment } from './assessment-utils.js';
 import { getPrimaryEntity } from './entity-utils.js';
 import {
@@ -59,7 +63,8 @@ function buildSharedEvidenceBoard(
 ): EvidenceBoard {
   const priorAssessments = previousRound?.assessments ?? [];
   const priorEvidence = previousRound?.evidenceItems ?? [];
-  const priorDisagreements = previousRound?.disagreements ?? unresolvedDisagreements;
+  const priorDisagreements =
+    previousRound?.disagreements ?? unresolvedDisagreements;
   const positiveVotes = priorAssessments.filter(
     (assessment) => assessment.recommendedLabel === 1,
   ).length;
@@ -68,8 +73,7 @@ function buildSharedEvidenceBoard(
   ).length;
 
   return {
-    status:
-      positiveVotes > 0 && negativeVotes > 0 ? 'conflict' : 'agreement',
+    status: positiveVotes > 0 && negativeVotes > 0 ? 'conflict' : 'agreement',
     voteSummary: priorAssessments.map(summarizeAssessmentVote).slice(0, 6),
     positiveEvidence: dedupeStrings(
       priorEvidence
@@ -286,9 +290,7 @@ function deriveRoundDisagreements(
         triggeringEvidenceIds: contradictions.map((item) => item.id),
         status: 'open',
       };
-      disagreement.status = previous !== undefined
-        ? 'carried-forward'
-        : 'open';
+      disagreement.status = previous !== undefined ? 'carried-forward' : 'open';
       disagreements.push(disagreement);
       continue;
     }
@@ -310,9 +312,7 @@ function deriveRoundDisagreements(
         triggeringEvidenceIds: assessment.evidenceItems.map((item) => item.id),
         status: 'open',
       };
-      disagreement.status = previous !== undefined
-        ? 'carried-forward'
-        : 'open';
+      disagreement.status = previous !== undefined ? 'carried-forward' : 'open';
       disagreements.push(disagreement);
     }
   }
@@ -349,9 +349,7 @@ function deriveRoundDisagreements(
       ),
       status: 'open',
     };
-    disagreement.status = previous !== undefined
-      ? 'carried-forward'
-      : 'open';
+    disagreement.status = previous !== undefined ? 'carried-forward' : 'open';
     disagreements.push(disagreement);
   }
 

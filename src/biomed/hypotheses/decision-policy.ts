@@ -12,7 +12,8 @@ function findRoot(
   kind: 'positive' | 'negative',
 ): HypothesisRecord | undefined {
   return hypotheses.find(
-    (hypothesis) => hypothesis.kind === kind && hypothesis.parentId === undefined,
+    (hypothesis) =>
+      hypothesis.kind === kind && hypothesis.parentId === undefined,
   );
 }
 
@@ -60,7 +61,10 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
     };
   }
 
-  if (positiveRoot.status === 'supported' && negativeRoot.status !== 'supported') {
+  if (
+    positiveRoot.status === 'supported' &&
+    negativeRoot.status !== 'supported'
+  ) {
     return {
       status: 'supported',
       decisionMode: 'settled',
@@ -72,7 +76,10 @@ export function decideLabel(input: DecisionPolicyInput): DecisionRecord {
     };
   }
 
-  if (negativeRoot.status === 'supported' || positiveRoot.status === 'refuted') {
+  if (
+    negativeRoot.status === 'supported' ||
+    positiveRoot.status === 'refuted'
+  ) {
     return {
       status: 'refuted',
       decisionMode: 'settled',

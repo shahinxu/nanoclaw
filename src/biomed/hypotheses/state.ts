@@ -97,9 +97,13 @@ function collectRelevantEvidence(
   round: SampleRoundRecord,
   hypothesis: HypothesisRecord,
 ): EvidenceItem[] {
-  const targetedRoles = (
-    hypothesis.targetedRoles ?? roleForBranchTopic(hypothesis.topicKey)
-  ) ?? ['drug', 'protein', 'disease', 'graph'];
+  const targetedRoles = hypothesis.targetedRoles ??
+    roleForBranchTopic(hypothesis.topicKey) ?? [
+      'drug',
+      'protein',
+      'disease',
+      'graph',
+    ];
   const sources = new Set(
     targetedRoles
       .map((role) => SOURCE_BY_ROLE[role])
@@ -381,13 +385,19 @@ function aggregateFromChildren(
   HypothesisRecord,
   'status' | 'confidence' | 'evidenceFor' | 'evidenceAgainst'
 > {
-  const supportedChildren = children.filter((child) => child.status === 'supported');
-  const refutedChildren = children.filter((child) => child.status === 'refuted');
+  const supportedChildren = children.filter(
+    (child) => child.status === 'supported',
+  );
+  const refutedChildren = children.filter(
+    (child) => child.status === 'refuted',
+  );
   const unresolvedChildren = children.filter(
     (child) => child.status === 'open' || child.status === 'insufficient',
   );
   const evidenceFor = dedupe(children.flatMap((child) => child.evidenceFor));
-  const evidenceAgainst = dedupe(children.flatMap((child) => child.evidenceAgainst));
+  const evidenceAgainst = dedupe(
+    children.flatMap((child) => child.evidenceAgainst),
+  );
 
   if (hypothesis.kind === 'positive') {
     const childrenByTopic = new Map(
@@ -408,7 +418,8 @@ function aggregateFromChildren(
       (child) => child.status === 'refuted',
     ).length;
     const graphSupported =
-      childrenByTopic.get('criterion.graph-specificity')?.status === 'supported';
+      childrenByTopic.get('criterion.graph-specificity')?.status ===
+      'supported';
     const graphRefuted =
       childrenByTopic.get('criterion.graph-specificity')?.status === 'refuted';
     const strongNegativeConsensus =
@@ -424,9 +435,7 @@ function aggregateFromChildren(
       };
     }
 
-    if (
-      essentialSupported === essentialChildren.length && graphSupported
-    ) {
+    if (essentialSupported === essentialChildren.length && graphSupported) {
       return {
         status: 'supported',
         confidence: 0.82,
@@ -435,7 +444,11 @@ function aggregateFromChildren(
       };
     }
 
-    if (coherentPositiveStory && essentialRefuted === 0 && roundNumber >= maxRounds) {
+    if (
+      coherentPositiveStory &&
+      essentialRefuted === 0 &&
+      roundNumber >= maxRounds
+    ) {
       return {
         status: 'supported',
         confidence: 0.72,
@@ -499,10 +512,7 @@ function aggregateFromChildren(
   }
   if (roundNumber >= maxRounds) {
     return {
-      status: localVoteStatus(
-        supportedChildren.length,
-        refutedChildren.length,
-      ),
+      status: localVoteStatus(supportedChildren.length, refutedChildren.length),
       confidence: 0.52,
       evidenceFor,
       evidenceAgainst,
@@ -547,7 +557,10 @@ function propagateStatuses(
 
     current.status = update.status;
     current.confidence = update.confidence;
-    current.evidenceFor = dedupe([...current.evidenceFor, ...update.evidenceFor]);
+    current.evidenceFor = dedupe([
+      ...current.evidenceFor,
+      ...update.evidenceFor,
+    ]);
     current.evidenceAgainst = dedupe([
       ...current.evidenceAgainst,
       ...update.evidenceAgainst,
@@ -555,8 +568,12 @@ function propagateStatuses(
     current.lastUpdatedRound = round.roundNumber;
   }
 
-  const positiveRoot = next.find((hypothesis) => hypothesis.kind === 'positive');
-  const negativeRoot = next.find((hypothesis) => hypothesis.kind === 'negative');
+  const positiveRoot = next.find(
+    (hypothesis) => hypothesis.kind === 'positive',
+  );
+  const negativeRoot = next.find(
+    (hypothesis) => hypothesis.kind === 'negative',
+  );
   if (positiveRoot && negativeRoot) {
     negativeRoot.status =
       positiveRoot.status === 'supported'

@@ -207,7 +207,9 @@ export class GraphAgent {
                 narrativeText ||
                 'The local graph provides moderate neighborhood evidence for the queried triplet.',
             }
-          : localGraphInformative && alternativePressure && topHyperedges.some(
+          : localGraphInformative &&
+              alternativePressure &&
+              topHyperedges.some(
                 (candidate) => (candidate.introducedEntities?.length ?? 0) > 0,
               )
             ? {
@@ -217,15 +219,15 @@ export class GraphAgent {
                   narrativeText ||
                   'The local graph is better bridged through alternative entities than through the queried triplet, which counts against the current mechanism.',
               }
-          : localGraphInformative && supportTier === 'weak'
-            ? {
+            : localGraphInformative && supportTier === 'weak'
+              ? {
                   stance: 'contradicts' as const,
-                strength: 'weak' as const,
-                claim:
-                  narrativeText ||
+                  strength: 'weak' as const,
+                  claim:
+                    narrativeText ||
                     'The local graph provides weak but incomplete neighborhood evidence for the queried triplet.',
-              }
-            : null);
+                }
+              : null);
 
     const entityScope = [drug, protein, disease].filter(
       (value): value is string => Boolean(value),

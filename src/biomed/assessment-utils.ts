@@ -1,8 +1,4 @@
-import {
-  AgentAssessment,
-  AgentRoundContext,
-  EvidenceItem,
-} from './types.js';
+import { AgentAssessment, AgentRoundContext, EvidenceItem } from './types.js';
 
 export function normalizeText(value: string): string {
   return value

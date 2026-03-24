@@ -53,7 +53,6 @@ function diseaseKeywords(diseaseId: string | undefined): string[] {
   return [];
 }
 
-
 function detectProteinDiseaseSignal(
   textSummary: string,
   diseaseId: string | undefined,
@@ -219,8 +218,18 @@ function primaryHypothesisStatement(
 }
 
 function mergeResearchOutputs(
-  primaryResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
-  nodeResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
+  primaryResult: {
+    toolName: string;
+    status: 'ok' | 'error';
+    textSummary: string;
+    structured: Record<string, unknown> | null;
+  },
+  nodeResult: {
+    toolName: string;
+    status: 'ok' | 'error';
+    textSummary: string;
+    structured: Record<string, unknown> | null;
+  },
 ): {
   textSummary: string;
   structured: Record<string, unknown>;
@@ -242,9 +251,10 @@ function mergeResearchOutputs(
   };
 }
 
-function localNodeEvidenceSignal(
-  nodeResult: { status: string; structured: Record<string, unknown> | null },
-): Pick<EvidenceItem, 'stance' | 'strength'> {
+function localNodeEvidenceSignal(nodeResult: {
+  status: string;
+  structured: Record<string, unknown> | null;
+}): Pick<EvidenceItem, 'stance' | 'strength'> {
   const nodeFound = nodeResult.structured?.node_found === true;
   if (nodeResult.status === 'ok' && nodeFound) {
     return { stance: 'supports', strength: 'weak' };
@@ -417,15 +427,14 @@ export class ProteinAgent {
         });
       }
 
-      const heuristicSignal =
-        isInformativeToolResult(result)
-          ? detectProteinDiseaseSignal(
-              mergedResult.textSummary,
-              diseaseId,
-              mergedResult.structured,
-              roundContext,
-            )
-          : null;
+      const heuristicSignal = isInformativeToolResult(result)
+        ? detectProteinDiseaseSignal(
+            mergedResult.textSummary,
+            diseaseId,
+            mergedResult.structured,
+            roundContext,
+          )
+        : null;
 
       const diseaseSignal = heuristicSignal;
       const finalOutput = reasonedOutput ?? diseaseSignal;

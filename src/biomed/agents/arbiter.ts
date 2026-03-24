@@ -34,7 +34,10 @@ function summarizeVotes(assessments: AgentAssessment[]): {
   return {
     positiveVotes,
     negativeVotes,
-    abstentions: Math.max(0, assessments.length - positiveVotes - negativeVotes),
+    abstentions: Math.max(
+      0,
+      assessments.length - positiveVotes - negativeVotes,
+    ),
   };
 }
 
@@ -74,8 +77,8 @@ export class Arbiter {
           id: `arbiter-decision-${input.sample.sampleIndex}`,
           source: 'arbiter_agent',
           toolName: 'majority_vote',
-          entityScope: Object.values(input.sample.entityDict).flatMap((value) =>
-            Array.isArray(value) ? value : [value],
+          entityScope: Object.values(input.sample.entityDict).flatMap(
+            (value) => (Array.isArray(value) ? value : [value]),
           ),
           claim,
           stance,
@@ -103,9 +106,10 @@ export class Arbiter {
         confidence:
           strength === 'strong' ? 0.8 : strength === 'moderate' ? 0.68 : 0.56,
         rationale: claim,
-        blockingGaps: input.rounds.at(-1)?.disagreements.map(
-          (disagreement) => disagreement.question,
-        ) ?? [],
+        blockingGaps:
+          input.rounds
+            .at(-1)
+            ?.disagreements.map((disagreement) => disagreement.question) ?? [],
         contradictions: input.assessments.flatMap((assessment) =>
           assessment.evidenceItems
             .filter((item) => item.stance === 'contradicts')
