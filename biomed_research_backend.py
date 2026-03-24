@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import csv
+import html
+import json
+import re
+from pathlib import Path
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -18,25 +23,116 @@ def _non_empty_strings(values: Any) -> List[str]:
     return [str(value).strip() for value in values if str(value).strip()]
 
 
-def _protein_focus_keywords(protein_id: Optional[str]) -> List[str]:
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for value in values:
+        cleaned = str(value or '').strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(cleaned)
+    return ordered
+
+
+def _node_context_row(
+    workspace_root: Optional[str],
+    entity_type: str,
+    entity_id: Optional[str],
+) -> Optional[Dict[str, str]]:
+    root_text = str(workspace_root or '').strip()
+    lookup_id = str(entity_id or '').strip()
+    if not root_text or not lookup_id:
+        return None
+    node_specs = {
+        'drug': ('data_node/node_drug_SMILES.csv', 'drugbank_id'),
+        'protein': ('data_node/node_protein_sequence.csv', 'gene_symbol'),
+        'disease': ('data_node/node_disease_def.csv', 'mondo_id'),
+        'cellline': ('data_node/node_cell-line_descriptions.csv', 'cvcl_id'),
+        'sideeffect': ('data_node/node_side-effect_description.csv', 'CUI'),
+    }
+    spec = node_specs.get(entity_type)
+    if spec is None:
+        return None
+    relative_path, key_field = spec
+    rows = _load_node_context_rows(str(Path(root_text) / relative_path), key_field)
+    return rows.get(lookup_id)
+
+
+def _normalize_keyword_variants(value: str) -> List[str]:
+    cleaned = _clean_node_text(value).lower()
+    if not cleaned:
+        return []
+    variants = [cleaned]
+    if '-' in cleaned:
+        variants.append(cleaned.replace('-', ' '))
+    if 'sodium chloride' in cleaned and 'na cl' not in cleaned:
+        variants.append(cleaned.replace('sodium chloride', 'na cl'))
+        variants.append(cleaned.replace('sodium chloride', 'na-cl'))
+    if 'thiazide-sensitive sodium-chloride cotransporter' in cleaned:
+        variants.extend([
+            'thiazide sensitive sodium chloride cotransporter',
+            'na-cl cotransporter',
+            'ncc',
+        ])
+    return _dedupe_preserve_order(variants)
+
+
+def _extract_protein_alias_keywords(node_name: str, description: str) -> List[str]:
+    candidates: List[str] = []
+    for source in [node_name, description]:
+        cleaned = _clean_node_text(source)
+        if not cleaned:
+            continue
+        candidates.extend(_normalize_keyword_variants(cleaned))
+        for match in re.finditer(
+            r'([A-Za-z0-9/-]+(?:\s+[A-Za-z0-9/-]+){0,6}\s+(?:receptor|channel|transporter|cotransporter|symporter|antiporter|kinase|phosphatase|enzyme|protein))',
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            candidates.extend(_normalize_keyword_variants(match.group(1)))
+        for match in re.finditer(r'\(([A-Za-z0-9-]{2,10})\)', cleaned):
+            alias = match.group(1).strip()
+            if len(alias) >= 2:
+                candidates.append(alias.lower())
+    return _dedupe_preserve_order(candidates)
+
+
+def _protein_focus_keywords(
+    protein_id: Optional[str],
+    workspace_root: Optional[str] = None,
+) -> List[str]:
     protein = (protein_id or '').strip().upper()
     if not protein:
         return []
+    keywords: List[str] = [protein.lower()]
     if protein.startswith('CACN'):
-        return [protein.lower(), 'calcium channel', 'voltage gated calcium channel', 'l type calcium channel']
+        keywords.extend(['calcium channel', 'voltage gated calcium channel', 'l type calcium channel'])
     if protein.startswith('ADRB'):
-        return [protein.lower(), 'adrenergic receptor', 'beta adrenergic receptor', 'adrenoceptor']
+        keywords.extend(['adrenergic receptor', 'beta adrenergic receptor', 'adrenoceptor'])
     if protein.startswith('ADRA'):
-        return [protein.lower(), 'adrenergic receptor', 'alpha adrenergic receptor', 'adrenoceptor']
+        keywords.extend(['adrenergic receptor', 'alpha adrenergic receptor', 'adrenoceptor'])
     if protein.startswith('AGTR'):
-        return [protein.lower(), 'angiotensin receptor']
+        keywords.append('angiotensin receptor')
     if protein == 'EGFR':
-        return ['egfr', 'epidermal growth factor receptor']
+        keywords.append('epidermal growth factor receptor')
     if protein == 'MTOR':
-        return ['mtor', 'mechanistic target of rapamycin']
+        keywords.append('mechanistic target of rapamycin')
     if protein == 'DHFR':
-        return ['dhfr', 'dihydrofolate reductase']
-    return [protein.lower()]
+        keywords.append('dihydrofolate reductase')
+
+    row = _node_context_row(workspace_root, 'protein', protein)
+    if row:
+        keywords.extend(
+            _extract_protein_alias_keywords(
+                str(row.get('node_name') or ''),
+                str(row.get('description') or ''),
+            )
+        )
+    return _dedupe_preserve_order(keywords)
 
 
 def _disease_focus_keywords(disease_id: Optional[str]) -> List[str]:
@@ -62,6 +158,12 @@ def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[s
     if not review_context:
         return ''
     segments: List[str] = []
+    local_priority = str(review_context.get('localEvidencePriority') or '').strip()
+    local_node_summary = str(review_context.get('localNodeSummary') or '').strip()
+    if local_priority == 'primary':
+        segments.append('Local node context was designated as the primary grounding source for this review.')
+    if local_node_summary:
+        segments.append(f'Primary local node grounding: {local_node_summary}')
     focus_mode = str(review_context.get('focusMode') or '').strip()
     focal_question = str(review_context.get('focalQuestion') or '').strip()
     if focus_mode:
@@ -95,14 +197,453 @@ def _http_post(
     url: str,
     *,
     json_payload: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
     timeout: int = 10,
 ) -> requests.Response:
-    return requests.post(url, json=json_payload, timeout=timeout)
+    return requests.post(url, json=json_payload, headers=headers, timeout=timeout)
+
+
+def _read_text_file(path_value: Any) -> str:
+    path_text = str(path_value or '').strip()
+    if not path_text:
+        return ''
+    path = Path(path_text)
+    if not path.exists():
+        return ''
+    try:
+        return path.read_text(encoding='utf-8').strip()
+    except Exception:
+        return ''
+
+
+def _clean_node_text(value: str) -> str:
+    text = html.unescape(str(value or '').strip())
+    if not text:
+        return ''
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'"xrefs"\s*:\s*\[[^\]]*\]\s*\}?', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip(' .,;')
+
+
+@lru_cache(maxsize=32)
+def _load_node_context_rows(csv_path: str, key_field: str) -> Dict[str, Dict[str, str]]:
+    path = Path(csv_path)
+    if not path.exists():
+        return {}
+    rows: Dict[str, Dict[str, str]] = {}
+    try:
+        with path.open('r', encoding='utf-8', newline='') as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get(key_field) or '').strip()
+                if not key:
+                    continue
+                rows[key] = {str(k): str(v or '') for k, v in row.items()}
+    except Exception:
+        return {}
+    return rows
+
+
+def _node_context(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    workspace_root = Path(str(arguments.get('workspace_root') or '').strip())
+    entity_type = str(arguments.get('entity_type') or '').strip().lower()
+    entity_id = str(arguments.get('entity_id') or '').strip()
+
+    node_specs = {
+        'drug': ('data_node/node_drug_SMILES.csv', 'drugbank_id'),
+        'protein': ('data_node/node_protein_sequence.csv', 'gene_symbol'),
+        'disease': ('data_node/node_disease_def.csv', 'mondo_id'),
+        'cellline': ('data_node/node_cell-line_descriptions.csv', 'cvcl_id'),
+        'sideeffect': ('data_node/node_side-effect_description.csv', 'CUI'),
+    }
+
+    if entity_type not in node_specs or not entity_id or not workspace_root:
+        return {
+            'text_summary': '[node_context] Missing entity type, entity id, or workspace root; local node context was unavailable.',
+            'structured': {
+                'entity_type': entity_type or None,
+                'entity_id': entity_id or None,
+                'node_found': False,
+            },
+        }
+
+    relative_path, key_field = node_specs[entity_type]
+    csv_path = workspace_root / relative_path
+    rows = _load_node_context_rows(str(csv_path), key_field)
+    row = rows.get(entity_id)
+    if row is None:
+        return {
+            'text_summary': f'[node_context] No local node context entry was found for {entity_type} {entity_id}.',
+            'structured': {
+                'entity_type': entity_type,
+                'entity_id': entity_id,
+                'node_found': False,
+                'csv_path': str(csv_path),
+            },
+        }
+
+    node_name = _clean_node_text(str(row.get('node_name') or ''))
+    description = _clean_node_text(str(row.get('description') or ''))
+    sequence = _clean_node_text(str(row.get('sequence') or ''))
+    smiles = _clean_node_text(str(row.get('smiles') or ''))
+
+    summary_parts = [f'Local node context for {entity_type} {entity_id}.']
+    if node_name:
+        summary_parts.append(f'Name: {node_name}.')
+    if description:
+        summary_parts.append(f'Description: {description}')
+    if smiles:
+        summary_parts.append(f'SMILES: {smiles}')
+    if sequence:
+        preview = sequence[:80] + ('...' if len(sequence) > 80 else '')
+        summary_parts.append(f'Sequence preview: {preview}')
+
+    return {
+        'text_summary': ' '.join(summary_parts),
+        'structured': {
+            'entity_type': entity_type,
+            'entity_id': entity_id,
+            'node_found': True,
+            'node_name': node_name or None,
+            'description': description or None,
+            'sequence': sequence or None,
+            'smiles': smiles or None,
+            'csv_path': str(csv_path),
+        },
+    }
+
+
+def _parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+    candidate = text.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+    start = candidate.find('{')
+    end = candidate.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(candidate[start:end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    review = _normalize_review_context(arguments.get('review_context'))
+    api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
+    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    graph_summary = str(arguments.get('graph_summary') or '').strip()
+    graph_structured = arguments.get('graph_structured')
+
+    if not api_key:
+        return {
+            'text_summary': '[graph_reasoner] OpenRouter API key is missing, so graph-side model judgment could not be produced.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': 'Graph-side model judgment was unavailable because the OpenRouter API key could not be read.',
+                'model': model,
+            },
+        }
+
+    prompt_payload = {
+        'task': 'Decide whether the graph evidence supports or contradicts the queried drug-protein-disease triplet.',
+        'decision_space': {
+            'recommended_label': '0 or 1 only',
+            'stance': ['supports', 'contradicts'],
+            'strength': ['strong', 'moderate', 'weak'],
+        },
+        'instructions': [
+            'Use the graph evidence, the shared evidence board, and your biological intuition about what the neighborhood implies for the queried triplet.',
+            'You are allowed to use broad, indirect, or suggestive graph structure if it forms a biologically coherent story for the query.',
+            'Absence of explicit local closure or exact triplet recovery is informative but not an automatic reason to vote 0.',
+            'Use the shared evidence board and round objective as real debate context.',
+            'Do not hedge. Return one binary vote and one concise claim.',
+        ],
+        'review_context': review,
+        'graph_summary': graph_summary,
+        'graph_structured': graph_structured,
+        'response_schema': {
+            'recommended_label': '0 or 1',
+            'stance': 'supports or contradicts',
+            'strength': 'strong, moderate, or weak',
+            'claim': 'short explanation grounded in the graph evidence and the shared board',
+        },
+    }
+
+    response = _http_post(
+        f'{base_url}/chat/completions',
+        json_payload={
+            'model': model,
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'You are a biomedical graph debate agent. Use graph structure flexibly and intelligently rather than as a rigid rule system. Output valid JSON only.',
+                },
+                {
+                    'role': 'user',
+                    'content': json.dumps(prompt_payload, ensure_ascii=False),
+                },
+            ],
+        },
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        timeout=45,
+    )
+
+    if not response.ok:
+        return {
+            'text_summary': f'[graph_reasoner] OpenRouter call failed with status {response.status_code}.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': 'Graph-side model judgment failed, so no positive graph conclusion could be trusted.',
+                'model': model,
+                'status_code': response.status_code,
+            },
+        }
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    content = ''
+    if isinstance(payload, dict):
+        choices = payload.get('choices') or []
+        if isinstance(choices, list) and choices:
+            message = choices[0].get('message') if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = str(message.get('content') or '')
+
+    parsed = _parse_json_object(content)
+    if not parsed:
+        return {
+            'text_summary': '[graph_reasoner] The model returned an unreadable response, so graph-side judgment fell back to a negative default.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': 'Graph-side model judgment was unreadable and could not justify a positive vote.',
+                'model': model,
+                'raw_content': content,
+            },
+        }
+
+    label_value = parsed.get('recommended_label')
+    try:
+        label = 1 if int(label_value) == 1 else 0
+    except Exception:
+        label = 0
+    stance = parsed.get('stance')
+    if stance not in ('supports', 'contradicts'):
+        stance = 'supports' if label == 1 else 'contradicts'
+    strength = parsed.get('strength')
+    if strength not in ('strong', 'moderate', 'weak'):
+        strength = 'moderate' if label == 1 else 'weak'
+    claim = str(parsed.get('claim') or '').strip() or (
+        'The graph-side model judged the graph evidence as supportive.'
+        if label == 1
+        else 'The graph-side model judged the graph evidence as insufficient or contradictory.'
+    )
+
+    return {
+        'text_summary': f'[graph_reasoner] The model voted {label} based on graph evidence and the shared evidence board.',
+        'structured': {
+            'recommended_label': label,
+            'stance': stance,
+            'strength': strength,
+            'claim': claim,
+            'model': model,
+        },
+    }
+
+
+def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    review = _normalize_review_context(arguments.get('review_context'))
+    api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
+    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    role = str(arguments.get('role') or 'biomedical').strip().lower() or 'biomedical'
+    evidence_summary = str(arguments.get('evidence_summary') or '').strip()
+    evidence_structured = arguments.get('evidence_structured')
+    entity_context = arguments.get('entity_context')
+
+    if not api_key:
+        return {
+            'text_summary': f'[biomedical_expert_reasoner] OpenRouter API key is missing, so {role}-side model judgment could not be produced.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': f'{role.capitalize()}-side model judgment was unavailable because the OpenRouter API key could not be read.',
+                'retrieved_evidence_basis': [],
+                'knowledge_based_inference': '',
+                'model': model,
+                'role': role,
+            },
+        }
+
+    prompt_payload = {
+        'task': f'Decide whether the {role}-side expert should vote 1 or 0 on the queried drug-protein-disease triplet.',
+        'decision_space': {
+            'recommended_label': '0 or 1 only',
+            'stance': ['supports', 'contradicts'],
+            'strength': ['strong', 'moderate', 'weak'],
+        },
+        'instructions': [
+            'Start from the local node context when it is available. Treat it as the primary grounding source for entity identity, aliases, and baseline biology before weighing external API evidence.',
+            'Use your biomedical knowledge and reasoning as fully as possible, together with the retrieved evidence.',
+            'There is no requirement that supporting evidence be direct, explicit, non-generic, or fully complete before you can vote 1.',
+            'Broad physiology, pharmacology, disease mechanism, target-class knowledge, alias resolution, and mechanistic analogy are all valid forms of support if they make biological sense for the queried triplet.',
+            'Absence of an exact string match or an explicitly named direct interaction is not by itself a reason to vote 0.',
+            'Weigh retrieved evidence, shared debate context, and your own biological judgment together, then decide which side is more convincing overall.',
+            'Only vote 0 when the total biological story is genuinely unconvincing, contradictory, or better explained by another mechanism.',
+            'Separate retrieved evidence from your knowledge-based inference in the JSON fields so the reasoning remains auditable.',
+            'Return one binary vote and one concise claim only.',
+        ],
+        'review_context': review,
+        'entity_context': entity_context,
+        'evidence_summary': evidence_summary,
+        'evidence_structured': evidence_structured,
+        'response_schema': {
+            'recommended_label': '0 or 1',
+            'stance': 'supports or contradicts',
+            'strength': 'strong, moderate, or weak',
+            'claim': 'short explanation integrating retrieved evidence and biomedical reasoning',
+            'retrieved_evidence_basis': ['short bullets naming the concrete retrieved facts actually used'],
+            'knowledge_based_inference': 'short note describing the model-based biomedical inference used, or empty string',
+        },
+    }
+
+    response = _http_post(
+        f'{base_url}/chat/completions',
+        json_payload={
+            'model': model,
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist, not like a rigid rule checker. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
+                },
+                {
+                    'role': 'user',
+                    'content': json.dumps(prompt_payload, ensure_ascii=False),
+                },
+            ],
+        },
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        timeout=45,
+    )
+
+    if not response.ok:
+        return {
+            'text_summary': f'[biomedical_expert_reasoner] OpenRouter call failed with status {response.status_code}.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': f'{role.capitalize()}-side model judgment failed, so no positive expert conclusion could be trusted.',
+                'retrieved_evidence_basis': [],
+                'knowledge_based_inference': '',
+                'model': model,
+                'role': role,
+                'status_code': response.status_code,
+            },
+        }
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    content = ''
+    if isinstance(payload, dict):
+        choices = payload.get('choices') or []
+        if isinstance(choices, list) and choices:
+            message = choices[0].get('message') if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = str(message.get('content') or '')
+
+    parsed = _parse_json_object(content)
+    if not parsed:
+        return {
+            'text_summary': '[biomedical_expert_reasoner] The model returned an unreadable response, so expert-side judgment fell back to a negative default.',
+            'structured': {
+                'recommended_label': 0,
+                'stance': 'contradicts',
+                'strength': 'weak',
+                'claim': f'{role.capitalize()}-side model judgment was unreadable and could not justify a positive vote.',
+                'retrieved_evidence_basis': [],
+                'knowledge_based_inference': '',
+                'model': model,
+                'role': role,
+                'raw_content': content,
+            },
+        }
+
+    label_value = parsed.get('recommended_label')
+    try:
+        label = 1 if int(label_value) == 1 else 0
+    except Exception:
+        label = 0
+    stance = parsed.get('stance')
+    if stance not in ('supports', 'contradicts'):
+        stance = 'supports' if label == 1 else 'contradicts'
+    strength = parsed.get('strength')
+    if strength not in ('strong', 'moderate', 'weak'):
+        strength = 'moderate' if label == 1 else 'weak'
+    claim = str(parsed.get('claim') or '').strip() or (
+        f'The {role}-side model judged the biomedical evidence and reasoning as supportive.'
+        if label == 1
+        else f'The {role}-side model judged the biomedical evidence and reasoning as insufficient or contradictory.'
+    )
+    retrieved_basis = parsed.get('retrieved_evidence_basis')
+    if not isinstance(retrieved_basis, list):
+        retrieved_basis = []
+    retrieved_basis = [
+        str(value).strip() for value in retrieved_basis if str(value).strip()
+    ][:5]
+    knowledge_based_inference = str(parsed.get('knowledge_based_inference') or '').strip()
+
+    return {
+        'text_summary': f'[biomedical_expert_reasoner] The {role}-side model voted {label} using retrieved evidence plus biomedical reasoning.',
+        'structured': {
+            'recommended_label': label,
+            'stance': stance,
+            'strength': strength,
+            'claim': claim,
+            'retrieved_evidence_basis': retrieved_basis,
+            'knowledge_based_inference': knowledge_based_inference,
+            'model': model,
+            'role': role,
+        },
+    }
 
 
 def _drug_researcher(
     drugbank_id: Optional[str],
     review_context: Optional[Dict[str, Any]] = None,
+    workspace_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     did = (drugbank_id or '').strip()
     review = _normalize_review_context(review_context)
@@ -172,6 +713,15 @@ def _drug_researcher(
     mechanisms = _fetch_chembl_mechanisms(chembl_id)
     indications = _fetch_chembl_indications(chembl_id)
     target_protein = str(review.get('targetProteinId') or '').strip() or None
+    local_protein_row = _node_context_row(workspace_root, 'protein', target_protein)
+    local_protein_context = None
+    if local_protein_row:
+        local_protein_context = {
+            'gene_symbol': target_protein,
+            'node_name': _clean_node_text(str(local_protein_row.get('node_name') or '')) or None,
+            'description': _clean_node_text(str(local_protein_row.get('description') or '')) or None,
+        }
+    protein_focus_keywords = _protein_focus_keywords(target_protein, workspace_root)
     protein_keyword_hits: List[str] = []
     direct_mechanism_matches: List[Dict[str, Any]] = []
     if target_protein:
@@ -182,7 +732,7 @@ def _drug_researcher(
                 str(mechanism.get('mechanism_of_action') or ''),
                 str(mechanism.get('action_type') or ''),
             ]).strip()
-            matched = _text_contains_any(mechanism_text, _protein_focus_keywords(target_protein))
+            matched = _text_contains_any(mechanism_text, protein_focus_keywords)
             if matched:
                 protein_keyword_hits.extend([
                     keyword for keyword in matched if keyword not in protein_keyword_hits
@@ -209,6 +759,11 @@ def _drug_researcher(
             + '; '.join(moa_texts[:3])
             + '.'
         )
+    if local_protein_context and local_protein_context.get('node_name'):
+        summary_parts.append(
+            f'Local protein grounding for {target_protein}: {local_protein_context.get("node_name")}. '
+            'External mechanism text was interpreted against this local alias context first.'
+        )
     if direct_mechanism_matches:
         summary_parts.append(
             f'Targeted mechanism review for {target_protein} found keyword-aligned mechanism evidence: '
@@ -221,7 +776,7 @@ def _drug_researcher(
         )
     elif target_protein and str(review.get('focusMode') or '') == 'mechanism_only':
         summary_parts.append(
-            f'Targeted mechanism review for {target_protein} did not find a direct protein-aligned mechanism string in the returned ChEMBL mechanism fields.'
+            f'Targeted mechanism review for {target_protein} did not find an explicit mechanism string aligned to the locally grounded protein aliases in the returned ChEMBL mechanism fields.'
         )
 
     indication_terms: List[str] = []
@@ -250,6 +805,7 @@ def _drug_researcher(
     targeted_review = _build_targeted_review_summary(
         review,
         [
+            f'Protein grounding aliases: {", ".join(protein_focus_keywords[:8])}.' if protein_focus_keywords else '',
             f'Protein keyword hits in mechanism fields: {", ".join(protein_keyword_hits[:5])}.' if protein_keyword_hits else '',
             f'Disease indication hits: {", ".join(disease_indication_hits[:5])}.' if disease_indication_hits else '',
             'Non-mechanism indication context was intentionally de-emphasized for this round.'
@@ -298,6 +854,8 @@ def _drug_researcher(
                 'focal_question': review.get('focalQuestion'),
                 'target_protein_id': target_protein,
                 'target_disease_id': target_disease,
+                'protein_focus_keywords': protein_focus_keywords,
+                'local_protein_context': local_protein_context,
                 'direct_mechanism_matches': direct_mechanism_matches,
                 'protein_keyword_hits': protein_keyword_hits,
                 'peer_findings': _non_empty_strings(review.get('peerFindings')),
@@ -306,13 +864,20 @@ def _drug_researcher(
                 'target_protein_id': target_protein,
                 'target_disease_id': target_disease,
                 'direct_target_match': bool(direct_mechanism_matches),
+                'target_alignment_state': (
+                    'matched'
+                    if direct_mechanism_matches else
+                    'local-grounded-unresolved'
+                    if target_protein and protein_focus_keywords else
+                    'unresolved'
+                ),
                 'protein_keyword_hits': protein_keyword_hits,
                 'disease_indication_hits': disease_indication_hits,
                 'mechanism_record_count': len(mechanisms),
                 'evidence_summary': (
                     f'direct mechanism match to {target_protein}; disease indication overlap: {_list_text(disease_indication_hits)}'
                     if direct_mechanism_matches else
-                    f'no direct mechanism match to {target_protein}; disease indication overlap: {_list_text(disease_indication_hits)}'
+                    f'mechanism alignment unresolved for locally grounded target {target_protein}; disease indication overlap: {_list_text(disease_indication_hits)}'
                 ),
             },
             'sources': [
@@ -1056,9 +1621,19 @@ def _extract_chembl_safety_flags(chembl_molecule: Optional[Dict[str, Any]]) -> L
 def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     review_context = arguments.get('review_context')
     if name == 'drug_researcher':
-        return _drug_researcher(arguments.get('drugbank_id'), review_context)
+        return _drug_researcher(
+            arguments.get('drugbank_id'),
+            review_context,
+            arguments.get('workspace_root'),
+        )
     if name == 'protein_researcher':
         return _protein_researcher(arguments.get('gene_symbol'), review_context)
     if name == 'disease_researcher':
         return _disease_researcher(arguments.get('mondo_id'), review_context)
+    if name == 'node_context':
+        return _node_context(arguments)
+    if name == 'biomedical_expert_reasoner':
+        return _biomedical_expert_reasoner(arguments)
+    if name == 'graph_reasoner':
+        return _graph_reasoner(arguments)
     raise ValueError(f'Unsupported research tool: {name}')

@@ -9,7 +9,11 @@ export interface BiomedTaskSample {
   groundTruth?: BiomedLabel;
 }
 
-export type HypothesisKind = 'positive' | 'negative' | 'alternative-mechanism';
+export type HypothesisKind =
+  | 'positive'
+  | 'negative'
+  | 'criterion'
+  | 'alternative-mechanism';
 
 export type HypothesisStatus =
   | 'open'
@@ -22,6 +26,13 @@ export interface HypothesisRecord {
   statement: string;
   kind: HypothesisKind;
   status: HypothesisStatus;
+  topicKey?: string;
+  parentId?: string;
+  childIds: string[];
+  depth: number;
+  frontier: boolean;
+  dependencyMode?: 'all' | 'any' | 'majority';
+  targetedRoles?: Array<'drug' | 'protein' | 'disease' | 'graph'>;
   requiredChecks: string[];
   evidenceFor: string[];
   evidenceAgainst: string[];
@@ -32,7 +43,7 @@ export interface HypothesisRecord {
   revisionReason?: string;
 }
 
-export type EvidenceStance = 'supports' | 'contradicts' | 'insufficient';
+export type EvidenceStance = 'supports' | 'contradicts';
 
 export type EvidenceStrength = 'strong' | 'moderate' | 'weak';
 
@@ -79,11 +90,37 @@ export interface ResearchReviewContext {
   focalQuestion?: string;
   focus: string[];
   peerFindings: string[];
+  peerEvidence?: string[];
+  positiveEvidence?: string[];
+  negativeEvidence?: string[];
+  alternativeMechanismSignals?: string[];
+  sharedEvidenceBoard?: EvidenceBoard;
+  roundObjective?: RoundObjective;
   hypothesisFocus?: string[];
   activeHypothesisIds?: string[];
   targetDrugId?: string;
   targetProteinId?: string;
   targetDiseaseId?: string;
+  localNodeSummary?: string;
+  localNodeStructured?: Record<string, unknown>;
+  localEvidencePriority?: 'primary';
+}
+
+export interface EvidenceBoard {
+  status: 'agreement' | 'conflict';
+  voteSummary: string[];
+  positiveEvidence: string[];
+  negativeEvidence: string[];
+  contestedClaims: string[];
+  alternativeMechanismSignals: string[];
+  openQuestions: string[];
+}
+
+export interface RoundObjective {
+  title: string;
+  directive: string;
+  responseRequirement: string;
+  targetRoles: Array<'drug' | 'protein' | 'disease' | 'graph'>;
 }
 
 export interface ResearchToolAdapter {
@@ -109,6 +146,9 @@ export interface AgentEvaluationTrace {
 export interface RoundDisagreement {
   id: string;
   roundNumber: number;
+  fingerprint: string;
+  persistenceCount: number;
+  escalationLevel: 'initial' | 'escalated' | 'persistent';
   title: string;
   question: string;
   affectedRoles: Array<'drug' | 'protein' | 'disease'>;
@@ -122,8 +162,13 @@ export interface AgentRoundContext {
   maxRounds: number;
   focus: string[];
   disagreements: RoundDisagreement[];
-  priorRoundSummaries: string[];
+  sharedEvidenceBoard: EvidenceBoard;
+  roundObjective: RoundObjective;
   peerAssessmentSummaries: string[];
+  peerEvidenceDigest: string[];
+  positiveEvidenceDigest: string[];
+  negativeEvidenceDigest: string[];
+  alternativeMechanismSignals: string[];
   hypothesisFocus: string[];
   activeHypothesisIds: string[];
 }
@@ -132,6 +177,7 @@ export interface AgentAssessment {
   agentId: string;
   role: 'drug' | 'protein' | 'disease' | 'graph' | 'arbiter';
   roundNumber: number;
+  recommendedLabel: BiomedLabel;
   summary: string;
   hypothesesTouched: string[];
   plannerActions: PlannerAction[];
@@ -153,6 +199,8 @@ export interface SampleRoundRecord {
   roundNumber: number;
   focus: string[];
   disagreements: RoundDisagreement[];
+  sharedEvidenceBoard: EvidenceBoard;
+  roundObjective: RoundObjective;
   assessments: AgentAssessment[];
   evidenceItems: EvidenceItem[];
   hypothesisSnapshot: HypothesisRecord[];

@@ -13,58 +13,233 @@ import { NoopTraceWriter, type TraceWriter } from './trace-writer.js';
 import { CsvTaskLoader, type TaskLoader } from './task-loader.js';
 import { LocalGraphTool } from './tools/local-graph-tool.js';
 import { PythonResearchToolAdapter } from './tools/python-researcher-adapter.js';
+import { ALL_AGENT_ROLES, BIOMED_ROLES, SOURCE_BY_ROLE } from './agent-constants.js';
+import { summarizePeerAssessment } from './assessment-utils.js';
+import { getPrimaryEntity } from './entity-utils.js';
 import {
   AgentAssessment,
   AgentRoundContext,
   BiomedTaskSample,
+  EvidenceBoard,
+  EvidenceItem,
   HypothesisRecord,
   ResearchToolAdapter,
+  RoundObjective,
   RoundDisagreement,
   SampleTraceRecord,
   SampleRoundRecord,
   WorkflowResult,
 } from './types.js';
 
-const BIOMED_ROLES = ['drug', 'protein', 'disease'] as const;
-const ALL_AGENT_ROLES = ['drug', 'protein', 'disease', 'graph'] as const;
-
-function getPrimaryEntity(
-  sample: BiomedTaskSample,
-  key: 'drug' | 'protein' | 'disease',
-): string | undefined {
-  const value = sample.entityDict[key];
-  if (typeof value === 'string') {
-    return value.trim() || undefined;
-  }
-  if (Array.isArray(value)) {
-    return value.find((item) => item.trim() !== '')?.trim();
-  }
-  return undefined;
+function disagreementFingerprint(item: RoundDisagreement): string {
+  return [item.title, [...item.affectedRoles].sort().join(',')].join('::');
 }
 
-function disagreementFingerprint(item: RoundDisagreement): string {
-  return [
-    item.title,
-    item.question,
-    [...item.affectedRoles].sort().join(','),
-  ].join('::');
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim() !== ''))];
+}
+
+function evidenceDigest(item: EvidenceItem): string {
+  return `${item.source} ${item.stance}/${item.strength}: ${item.claim}`;
+}
+
+function hasAlternativeMechanismCue(value: string): boolean {
+  return /(alternative|substitute target|substitute pathway|different mechanism|another mechanism|redirect|better explains|rather than|instead of)/i.test(
+    value,
+  );
+}
+
+function summarizeAssessmentVote(assessment: AgentAssessment): string {
+  return `${assessment.role}=${assessment.recommendedLabel}: ${assessment.summary}`;
+}
+
+function buildSharedEvidenceBoard(
+  previousRound: SampleRoundRecord | undefined,
+  unresolvedDisagreements: RoundDisagreement[],
+): EvidenceBoard {
+  const priorAssessments = previousRound?.assessments ?? [];
+  const priorEvidence = previousRound?.evidenceItems ?? [];
+  const priorDisagreements = previousRound?.disagreements ?? unresolvedDisagreements;
+  const positiveVotes = priorAssessments.filter(
+    (assessment) => assessment.recommendedLabel === 1,
+  ).length;
+  const negativeVotes = priorAssessments.filter(
+    (assessment) => assessment.recommendedLabel === 0,
+  ).length;
+
+  return {
+    status:
+      positiveVotes > 0 && negativeVotes > 0 ? 'conflict' : 'agreement',
+    voteSummary: priorAssessments.map(summarizeAssessmentVote).slice(0, 6),
+    positiveEvidence: dedupeStrings(
+      priorEvidence
+        .filter((item) => item.stance === 'supports')
+        .map(evidenceDigest),
+    ).slice(0, 6),
+    negativeEvidence: dedupeStrings(
+      priorEvidence
+        .filter((item) => item.stance === 'contradicts')
+        .map(evidenceDigest),
+    ).slice(0, 6),
+    contestedClaims: dedupeStrings(
+      priorDisagreements.map(
+        (item) => `${item.title}: ${item.rationale || item.question}`,
+      ),
+    ).slice(0, 5),
+    alternativeMechanismSignals: dedupeStrings([
+      ...priorEvidence
+        .filter((item) => hasAlternativeMechanismCue(item.claim))
+        .map(evidenceDigest),
+      ...priorDisagreements
+        .filter(
+          (item) =>
+            hasAlternativeMechanismCue(item.question) ||
+            hasAlternativeMechanismCue(item.rationale),
+        )
+        .map((item) => `${item.title}: ${item.question}`),
+    ]).slice(0, 5),
+    openQuestions: dedupeStrings(
+      priorDisagreements.map((item) => item.question),
+    ).slice(0, 5),
+  };
+}
+
+function buildRoundObjective(
+  roundNumber: number,
+  board: EvidenceBoard,
+): RoundObjective {
+  if (roundNumber === 1 || board.voteSummary.length === 0) {
+    return {
+      title: 'Establish first-pass position',
+      directive:
+        'Build the initial positive and negative case for the queried triplet, then cast a binary 0/1 vote.',
+      responseRequirement:
+        'State a binary vote and name the strongest positive or negative claim you are relying on.',
+      targetRoles: [...ALL_AGENT_ROLES],
+    };
+  }
+
+  if (board.status === 'conflict') {
+    return {
+      title: 'Resolve the shared conflict',
+      directive:
+        'All agents must address the same vote split and decide whether the strongest positive evidence or the strongest negative evidence better explains the queried triplet.',
+      responseRequirement:
+        'Cast a binary vote, explicitly respond to at least one opposing claim from the shared evidence board, and state whether your vote changed.',
+      targetRoles: [...ALL_AGENT_ROLES],
+    };
+  }
+
+  return {
+    title: 'Stress-test the current consensus',
+    directive:
+      board.negativeEvidence.length > 0
+        ? 'The current board leans negative. Look for concrete evidence that could overturn that view before voting.'
+        : 'The current board leans positive. Look for concrete evidence that could break that view before voting.',
+    responseRequirement:
+      'Cast a binary vote and explain whether the shared board changed your confidence or not.',
+    targetRoles: [...ALL_AGENT_ROLES],
+  };
+}
+
+function collectPeerEvidence(
+  role: (typeof ALL_AGENT_ROLES)[number],
+  rounds: SampleRoundRecord[],
+): EvidenceItem[] {
+  const source = SOURCE_BY_ROLE[role];
+  return (rounds.at(-1)?.evidenceItems ?? []).filter(
+    (item) => item.source !== source,
+  );
+}
+
+function escalationLevel(
+  persistenceCount: number,
+): RoundDisagreement['escalationLevel'] {
+  if (persistenceCount >= 3) {
+    return 'persistent';
+  }
+  if (persistenceCount >= 2) {
+    return 'escalated';
+  }
+  return 'initial';
 }
 
 function createRoleGapQuestion(
   role: (typeof BIOMED_ROLES)[number],
   sample: BiomedTaskSample,
+  persistenceCount = 1,
 ): string {
   const drug = getPrimaryEntity(sample, 'drug') ?? 'the queried drug';
   const protein = getPrimaryEntity(sample, 'protein') ?? 'the queried protein';
   const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
 
   if (role === 'drug') {
-    return `Does ${drug} have a direct mechanism or target link to ${protein}, rather than only disease indication context?`;
+    if (persistenceCount >= 3) {
+      return `After repeated failed checks, should the debate abandon ${protein} as the primary target for ${drug} and search for an alternative mechanism that better explains ${disease}?`;
+    }
+    if (persistenceCount === 2) {
+      return `What biological or pharmacological evidence would make the ${drug}-${protein} mechanism convincing for ${disease}?`;
+    }
+    return `Should the drug-side expert currently vote 1 or 0 for a biologically meaningful ${drug}-${protein} mechanism relevant to ${disease}?`;
   }
   if (role === 'protein') {
-    return `Does ${protein} have disease-specific relevance for ${disease}, rather than only general biology?`;
+    if (persistenceCount >= 3) {
+      return `If ${protein} still lacks disease-specific support for ${disease}, which adjacent pathway or substitute target would explain the signal better than the queried protein?`;
+    }
+    if (persistenceCount === 2) {
+      return `Which phenotype, pathway, perturbation, or mechanistic clues link ${protein} to ${disease}?`;
+    }
+    return `Should the protein-side expert currently vote 1 or 0 for ${protein} being relevant to ${disease}?`;
   }
-  return `Does ${disease} explicitly support ${protein} as disease-relevant, rather than only generic background or treatment context?`;
+  if (persistenceCount >= 3) {
+    return `If ${disease} still does not implicate ${protein}, should the debate treat the disease side as unresolved and stop preserving the same positive story?`;
+  }
+  if (persistenceCount === 2) {
+    return `Which targets, treatments, biomarkers, or mechanistic clues connect ${disease} to ${protein}?`;
+  }
+  return `Should the disease-side expert currently vote 1 or 0 for ${protein} being supported by ${disease}?`;
+}
+
+function createRoleContradictionQuestion(
+  role: (typeof BIOMED_ROLES)[number],
+  sample: BiomedTaskSample,
+  persistenceCount = 1,
+): string {
+  const drug = getPrimaryEntity(sample, 'drug') ?? 'the queried drug';
+  const protein = getPrimaryEntity(sample, 'protein') ?? 'the queried protein';
+  const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
+
+  if (role === 'drug') {
+    return persistenceCount >= 2
+      ? `Which specific claims contradict the ${drug}-${protein} mechanism for ${disease}, and do they rule out the current positive hypothesis?`
+      : `What evidence contradicts a mechanism or target link between ${drug} and ${protein}?`;
+  }
+  if (role === 'protein') {
+    return persistenceCount >= 2
+      ? `Which specific findings argue against ${protein} being disease-relevant for ${disease}, rather than merely under-supported?`
+      : `What evidence contradicts ${protein} being disease-relevant for ${disease}?`;
+  }
+  return persistenceCount >= 2
+    ? `Which disease-side findings actively argue against ${protein} as a relevant target for ${disease}?`
+    : `What evidence contradicts ${disease} supporting ${protein} as disease-relevant?`;
+}
+
+function createCrossAgentMismatchQuestion(
+  sample: BiomedTaskSample,
+  supportRoles: Array<(typeof BIOMED_ROLES)[number]>,
+  persistenceCount = 1,
+): string {
+  const drug = getPrimaryEntity(sample, 'drug') ?? 'the queried drug';
+  const protein = getPrimaryEntity(sample, 'protein') ?? 'the queried protein';
+  const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
+
+  if (persistenceCount >= 3) {
+    return `After repeated disagreement, should the debate stop defending the direct ${drug}-${protein}-${disease} triplet and switch to a narrower alternative mechanism?`;
+  }
+  if (persistenceCount === 2) {
+    return `Which missing edge is preventing the ${drug}-${protein}-${disease} triplet from closing, and what additional evidence would make the current positive story convincing?`;
+  }
+  return 'Why are some experts currently voting 1 while others are voting 0 on the same relationship?';
 }
 
 function deriveRoundDisagreements(
@@ -74,8 +249,8 @@ function deriveRoundDisagreements(
   previousDisagreements: RoundDisagreement[],
 ): RoundDisagreement[] {
   const disagreements: RoundDisagreement[] = [];
-  const previousFingerprints = new Set(
-    previousDisagreements.map(disagreementFingerprint),
+  const previousByFingerprint = new Map(
+    previousDisagreements.map((item) => [disagreementFingerprint(item), item]),
   );
 
   for (const assessment of assessments) {
@@ -86,47 +261,56 @@ function deriveRoundDisagreements(
     }
 
     const role = assessment.role as (typeof BIOMED_ROLES)[number];
-    const supports = assessment.evidenceItems.filter(
-      (item) => item.stance === 'supports',
-    );
     const contradictions = assessment.evidenceItems.filter(
       (item) => item.stance === 'contradicts',
     );
 
-    if (contradictions.length > 0) {
+    if (assessment.recommendedLabel === 0) {
+      const fingerprint = `${role} contradiction::${role}`;
+      const previous = previousByFingerprint.get(fingerprint);
+      const persistenceCount = (previous?.persistenceCount ?? 0) + 1;
       const disagreement: RoundDisagreement = {
         id: `round-${roundNumber}-${role}-contradiction`,
         roundNumber,
+        fingerprint,
+        persistenceCount,
+        escalationLevel: escalationLevel(persistenceCount),
         title: `${role} contradiction`,
-        question: createRoleGapQuestion(role, sample),
+        question: createRoleContradictionQuestion(
+          role,
+          sample,
+          persistenceCount,
+        ),
         affectedRoles: [role],
-        rationale: contradictions.map((item) => item.claim).join(' | '),
+        rationale: `${contradictions.map((item) => item.claim).join(' | ')}${persistenceCount > 1 ? ` Persistent for ${persistenceCount} rounds.` : ''}`,
         triggeringEvidenceIds: contradictions.map((item) => item.id),
         status: 'open',
       };
-      disagreement.status = previousFingerprints.has(
-        disagreementFingerprint(disagreement),
-      )
+      disagreement.status = previous !== undefined
         ? 'carried-forward'
         : 'open';
       disagreements.push(disagreement);
       continue;
     }
 
-    if (supports.length === 0) {
+    if (assessment.recommendedLabel === 1) {
+      const fingerprint = `${role} evidence gap::${role}`;
+      const previous = previousByFingerprint.get(fingerprint);
+      const persistenceCount = (previous?.persistenceCount ?? 0) + 1;
       const disagreement: RoundDisagreement = {
         id: `round-${roundNumber}-${role}-gap`,
         roundNumber,
+        fingerprint,
+        persistenceCount,
+        escalationLevel: escalationLevel(persistenceCount),
         title: `${role} evidence gap`,
-        question: createRoleGapQuestion(role, sample),
+        question: createRoleGapQuestion(role, sample, persistenceCount),
         affectedRoles: [role],
-        rationale: assessment.summary,
+        rationale: `${assessment.summary}${persistenceCount > 1 ? ` Persistent for ${persistenceCount} rounds.` : ''}`,
         triggeringEvidenceIds: assessment.evidenceItems.map((item) => item.id),
         status: 'open',
       };
-      disagreement.status = previousFingerprints.has(
-        disagreementFingerprint(disagreement),
-      )
+      disagreement.status = previous !== undefined
         ? 'carried-forward'
         : 'open';
       disagreements.push(disagreement);
@@ -137,20 +321,27 @@ function deriveRoundDisagreements(
     .filter((assessment) =>
       BIOMED_ROLES.includes(assessment.role as (typeof BIOMED_ROLES)[number]),
     )
-    .filter((assessment) =>
-      assessment.evidenceItems.some((item) => item.stance === 'supports'),
-    )
+    .filter((assessment) => assessment.recommendedLabel === 1)
     .map((assessment) => assessment.role as (typeof BIOMED_ROLES)[number]);
 
   if (supportRoles.length > 0 && supportRoles.length < BIOMED_ROLES.length) {
+    const fingerprint = 'cross-agent mismatch::disease,drug,protein';
+    const previous = previousByFingerprint.get(fingerprint);
+    const persistenceCount = (previous?.persistenceCount ?? 0) + 1;
     const disagreement: RoundDisagreement = {
       id: `round-${roundNumber}-cross-agent-mismatch`,
       roundNumber,
+      fingerprint,
+      persistenceCount,
+      escalationLevel: escalationLevel(persistenceCount),
       title: 'cross-agent mismatch',
-      question:
-        'Why do some experts support the relationship while others still have missing or contradictory evidence?',
+      question: createCrossAgentMismatchQuestion(
+        sample,
+        supportRoles,
+        persistenceCount,
+      ),
       affectedRoles: [...BIOMED_ROLES],
-      rationale: `Support appears in roles: ${supportRoles.join(', ')}. Re-check the missing edge instead of repeating the same broad conclusion.`,
+      rationale: `Support appears in roles: ${supportRoles.join(', ')}. Re-check the missing edge instead of repeating the same broad conclusion.${persistenceCount > 1 ? ` Persistent for ${persistenceCount} rounds.` : ''}`,
       triggeringEvidenceIds: assessments.flatMap((assessment) =>
         assessment.evidenceItems
           .filter((item) => item.stance !== 'supports')
@@ -158,9 +349,7 @@ function deriveRoundDisagreements(
       ),
       status: 'open',
     };
-    disagreement.status = previousFingerprints.has(
-      disagreementFingerprint(disagreement),
-    )
+    disagreement.status = previous !== undefined
       ? 'carried-forward'
       : 'open';
     disagreements.push(disagreement);
@@ -215,36 +404,54 @@ function roleKeyword(role: (typeof ALL_AGENT_ROLES)[number]): string {
 function selectActiveHypotheses(
   hypotheses: HypothesisRecord[],
   role: (typeof ALL_AGENT_ROLES)[number],
+  currentDisagreements: RoundDisagreement[],
 ): HypothesisRecord[] {
-  const openOrSupported = hypotheses.filter(
-    (item) =>
-      item.status === 'open' ||
-      item.status === 'supported' ||
-      item.status === 'insufficient',
-  );
+  const candidates = hypotheses.filter((item) => {
+    if (!item.frontier) {
+      return false;
+    }
+    if (!item.targetedRoles || item.targetedRoles.length === 0) {
+      return true;
+    }
+    return item.targetedRoles.includes(role);
+  });
   const keyword = roleKeyword(role);
-  const roleSpecific = openOrSupported.filter((item) => {
+
+  const scored = candidates.map((item) => {
     const haystack = [
       item.statement,
+      item.topicKey ?? '',
       item.revisionReason ?? '',
       ...item.requiredChecks,
     ]
       .join(' ')
       .toLowerCase();
-    return haystack.includes(keyword);
+    let score = 0;
+
+    score += item.kind === 'alternative-mechanism' ? 8 : 5;
+    score += item.depth * 2;
+
+    if (haystack.includes(keyword)) {
+      score += 4;
+    }
+
+    if (
+      item.topicKey &&
+      currentDisagreements.some(
+        (disagreement) => disagreement.fingerprint === item.topicKey,
+      )
+    ) {
+      score += 6;
+    }
+
+    score += Math.min(item.lastUpdatedRound ?? 0, 10) * 0.1;
+    return { item, score };
   });
 
-  const prioritized = [
-    ...roleSpecific.sort(
-      (left, right) =>
-        (right.lastUpdatedRound ?? 0) - (left.lastUpdatedRound ?? 0),
-    ),
-    ...openOrSupported.filter(
-      (item) => !roleSpecific.some((candidate) => candidate.id === item.id),
-    ),
-  ];
-
-  return prioritized.slice(0, 3);
+  return scored
+    .sort((left, right) => right.score - left.score)
+    .map((entry) => entry.item)
+    .slice(0, 3);
 }
 
 function buildRoundContext(
@@ -254,39 +461,123 @@ function buildRoundContext(
   rounds: SampleRoundRecord[],
   unresolvedDisagreements: RoundDisagreement[],
   hypotheses: HypothesisRecord[],
+  sharedEvidenceBoard: EvidenceBoard,
+  roundObjective: RoundObjective,
 ): AgentRoundContext {
+  const previousRound = rounds.at(-1);
+  const contextDisagreements = previousRound?.disagreements ?? [];
   const roleDisagreements =
     role === 'graph'
-      ? unresolvedDisagreements
-      : unresolvedDisagreements.filter((item) =>
+      ? contextDisagreements
+      : contextDisagreements.filter((item) =>
           item.affectedRoles.includes(role),
         );
-  const previousRound = rounds.at(-1);
-  const activeHypotheses = selectActiveHypotheses(hypotheses, role);
+  const prioritizedDisagreements = [...roleDisagreements].sort(
+    (left, right) => right.persistenceCount - left.persistenceCount,
+  );
+  const activeHypotheses = selectActiveHypotheses(
+    hypotheses,
+    role,
+    prioritizedDisagreements,
+  );
+  const peerEvidenceItems = collectPeerEvidence(role, rounds);
+  const peerEvidenceDigest = dedupeStrings(
+    peerEvidenceItems.map(evidenceDigest),
+  ).slice(0, 8);
+  const positiveEvidenceDigest = dedupeStrings(
+    peerEvidenceItems
+      .filter((item) => item.stance === 'supports')
+      .map(evidenceDigest),
+  ).slice(0, 5);
+  const negativeEvidenceDigest = dedupeStrings(
+    peerEvidenceItems
+      .filter((item) => item.stance === 'contradicts')
+      .map(evidenceDigest),
+  ).slice(0, 5);
+  const alternativeMechanismSignals = dedupeStrings([
+    ...peerEvidenceItems
+      .filter((item) => hasAlternativeMechanismCue(item.claim))
+      .map(evidenceDigest),
+    ...prioritizedDisagreements
+      .filter(
+        (item) =>
+          hasAlternativeMechanismCue(item.question) ||
+          hasAlternativeMechanismCue(item.rationale),
+      )
+      .map((item) => `${item.title}: ${item.question}`),
+    ...activeHypotheses
+      .filter(
+        (item) =>
+          item.kind === 'alternative-mechanism' ||
+          hasAlternativeMechanismCue(item.statement) ||
+          hasAlternativeMechanismCue(item.revisionReason ?? ''),
+      )
+      .map((item) => item.statement),
+  ]).slice(0, 5);
+  const focus = dedupeStrings([
+    roundObjective.directive,
+    ...prioritizedDisagreements.slice(0, 2).map((item) => item.question),
+    ...activeHypotheses.flatMap((item) => item.requiredChecks.slice(0, 1)),
+  ]).slice(0, 3);
 
   return {
     roundNumber,
     maxRounds,
-    focus: roleDisagreements.map((item) => item.question),
-    disagreements: roleDisagreements,
-    priorRoundSummaries: rounds
-      .slice(-2)
-      .map((round) => `Round ${round.roundNumber}: ${round.summary}`),
+    focus,
+    disagreements: prioritizedDisagreements,
+    sharedEvidenceBoard,
+    roundObjective,
     peerAssessmentSummaries:
       previousRound?.assessments
         .filter((assessment) => assessment.role !== role)
-        .map((assessment) => `${assessment.role}: ${assessment.summary}`) ?? [],
+        .map(summarizePeerAssessment)
+        .slice(0, 8) ?? [],
+    peerEvidenceDigest,
+    positiveEvidenceDigest,
+    negativeEvidenceDigest,
+    alternativeMechanismSignals,
     hypothesisFocus: activeHypotheses.map(hypothesisFocusText),
     activeHypothesisIds: activeHypotheses.map((item) => item.id),
   };
 }
 
+function hasAgentConsensus(assessments: AgentAssessment[]): boolean {
+  if (assessments.length !== ALL_AGENT_ROLES.length) {
+    return false;
+  }
+
+  const firstLabel = assessments[0]?.recommendedLabel;
+  if (firstLabel === undefined) {
+    return false;
+  }
+
+  return assessments.every(
+    (assessment) => assessment.recommendedLabel === firstLabel,
+  );
+}
+
 function shouldContinue(
   roundNumber: number,
   maxRounds: number,
+  assessments: AgentAssessment[],
   current: RoundDisagreement[],
+  hypotheses: HypothesisRecord[],
 ): boolean {
-  if (roundNumber >= maxRounds || current.length === 0) {
+  const unresolvedFrontier = hypotheses.some(
+    (hypothesis) =>
+      hypothesis.frontier &&
+      (hypothesis.status === 'open' || hypothesis.status === 'insufficient'),
+  );
+
+  if (roundNumber >= maxRounds) {
+    return false;
+  }
+
+  if (hasAgentConsensus(assessments)) {
+    return false;
+  }
+
+  if (current.length === 0 && !unresolvedFrontier) {
     return false;
   }
 
@@ -345,6 +636,7 @@ export class BiomedWorkflowRunner {
         this.config.graphDataDir,
         this.config.relationshipType,
       ),
+      this.toolAdapter,
     );
     const arbiter = new Arbiter();
 
@@ -354,6 +646,15 @@ export class BiomedWorkflowRunner {
       roundNumber <= this.config.maxRounds;
       roundNumber++
     ) {
+      const previousRound = state.rounds.at(-1);
+      const sharedEvidenceBoard = buildSharedEvidenceBoard(
+        previousRound,
+        state.unresolvedDisagreements,
+      );
+      const roundObjective = buildRoundObjective(
+        roundNumber,
+        sharedEvidenceBoard,
+      );
       const drugAssessment = await drugAgent.assess(
         sample,
         state.hypotheses,
@@ -364,6 +665,8 @@ export class BiomedWorkflowRunner {
           state.rounds,
           state.unresolvedDisagreements,
           state.hypotheses,
+          sharedEvidenceBoard,
+          roundObjective,
         ),
       );
       const proteinAssessment = await proteinAgent.assess(
@@ -376,6 +679,8 @@ export class BiomedWorkflowRunner {
           state.rounds,
           state.unresolvedDisagreements,
           state.hypotheses,
+          sharedEvidenceBoard,
+          roundObjective,
         ),
       );
       const diseaseAssessment = await diseaseAgent.assess(
@@ -388,6 +693,8 @@ export class BiomedWorkflowRunner {
           state.rounds,
           state.unresolvedDisagreements,
           state.hypotheses,
+          sharedEvidenceBoard,
+          roundObjective,
         ),
       );
       const graphAssessment = await graphAgent.assess(
@@ -400,6 +707,8 @@ export class BiomedWorkflowRunner {
           state.rounds,
           state.unresolvedDisagreements,
           state.hypotheses,
+          sharedEvidenceBoard,
+          roundObjective,
         ),
       );
 
@@ -419,6 +728,8 @@ export class BiomedWorkflowRunner {
         roundNumber,
         focus: disagreements.map((item) => item.question),
         disagreements,
+        sharedEvidenceBoard,
+        roundObjective,
         assessments: latestAssessments,
         evidenceItems: latestAssessments.flatMap(
           (assessment) => assessment.evidenceItems,
@@ -430,19 +741,31 @@ export class BiomedWorkflowRunner {
           disagreements,
         ),
       };
-      state = advanceHypothesisState(state, round);
+      state = advanceHypothesisState(state, round, this.config.maxRounds);
 
-      if (!shouldContinue(roundNumber, this.config.maxRounds, disagreements)) {
+      if (
+        !shouldContinue(
+          roundNumber,
+          this.config.maxRounds,
+          latestAssessments,
+          state.unresolvedDisagreements,
+          state.hypotheses,
+        )
+      ) {
         break;
       }
     }
 
-    const decision = arbiter.decide({
+    const arbiterResult = await arbiter.decide({
       sample,
       hypotheses: state.hypotheses,
       assessments: latestAssessments,
-      config: this.config,
+      rounds: state.rounds,
     });
+    const finalAssessments = [...latestAssessments, arbiterResult.assessment];
+    const finalEvidenceItems = finalAssessments.flatMap(
+      (assessment) => assessment.evidenceItems,
+    );
 
     const trace: SampleTraceRecord = {
       sampleIndex: sample.sampleIndex,
@@ -451,17 +774,15 @@ export class BiomedWorkflowRunner {
       groundTruth: sample.groundTruth,
       hypotheses: state.hypotheses,
       rounds: state.rounds,
-      assessments: latestAssessments,
-      evidenceItems: latestAssessments.flatMap(
-        (assessment) => assessment.evidenceItems,
-      ),
-      decision,
+      assessments: finalAssessments,
+      evidenceItems: finalEvidenceItems,
+      decision: arbiterResult.decision,
     };
 
     if (this.config.writeTrace) {
       await this.traceWriter.writeTrace(trace);
     }
 
-    return { trace, decision };
+    return { trace, decision: arbiterResult.decision };
   }
 }

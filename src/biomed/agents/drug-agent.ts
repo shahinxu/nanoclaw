@@ -9,14 +9,18 @@ import {
   ResearchReviewContext,
   ResearchToolAdapter,
 } from '../types.js';
-import { executePlannerAction } from '../plan-executor.js';
-
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
+import {
+  binaryRecommendationFromEvidence,
+  hasAlternativeMechanismPressure,
+  normalizeText,
+  parseStructuredReasonerOutput,
+} from '../assessment-utils.js';
+import { getEntityIds, getPrimaryEntity } from '../entity-utils.js';
+import {
+  getInformativeToolStructured,
+  getInformativeToolSummary,
+  isInformativeToolResult,
+} from '../tool-result-utils.js';
 
 function proteinKeywords(proteinId: string): string[] {
   const normalized = proteinId.trim().toUpperCase();
@@ -83,58 +87,13 @@ function diseaseKeywords(diseaseId: string | undefined): string[] {
   return [];
 }
 
-function getDrugIds(sample: BiomedTaskSample): string[] {
-  const values: string[] = [];
-  const singleDrug = sample.entityDict.drug;
-  const multiDrug = sample.entityDict.drugs;
-
-  if (typeof singleDrug === 'string') {
-    values.push(singleDrug);
-  }
-  if (Array.isArray(singleDrug)) {
-    values.push(...singleDrug);
-  }
-  if (typeof multiDrug === 'string') {
-    values.push(multiDrug);
-  }
-  if (Array.isArray(multiDrug)) {
-    values.push(...multiDrug);
-  }
-
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-}
-
-function getPrimaryProteinId(sample: BiomedTaskSample): string | undefined {
-  const protein = sample.entityDict.protein;
-
-  if (typeof protein === 'string') {
-    return protein.trim() || undefined;
-  }
-  if (Array.isArray(protein)) {
-    return protein.find((value) => value.trim() !== '')?.trim();
-  }
-
-  return undefined;
-}
-
-function getPrimaryDiseaseId(sample: BiomedTaskSample): string | undefined {
-  const disease = sample.entityDict.disease;
-
-  if (typeof disease === 'string') {
-    return disease.trim() || undefined;
-  }
-  if (Array.isArray(disease)) {
-    return disease.find((value) => value.trim() !== '')?.trim();
-  }
-
-  return undefined;
-}
 
 function detectDrugProteinSignal(
   textSummary: string,
   proteinId: string | undefined,
   diseaseId: string | undefined,
   structured: Record<string, unknown> | null,
+  roundContext?: AgentRoundContext,
 ): {
   stance: EvidenceItem['stance'];
   strength: EvidenceItem['strength'];
@@ -142,7 +101,7 @@ function detectDrugProteinSignal(
 } {
   if (!proteinId) {
     return {
-      stance: 'insufficient',
+      stance: 'contradicts',
       strength: 'weak',
       claim:
         'No protein was provided, so drug-protein mechanism alignment could not be checked.',
@@ -184,6 +143,7 @@ function detectDrugProteinSignal(
   const mechanismCount = Array.isArray(structured?.mechanism_of_action)
     ? structured.mechanism_of_action.length
     : 0;
+  const alternativePressure = hasAlternativeMechanismPressure(roundContext);
 
   if (directMechanismMatches.length > 0) {
     if (diseaseIndicationHits.length > 0) {
@@ -202,6 +162,13 @@ function detectDrugProteinSignal(
   }
 
   if (proteinKeywordHits.length > 0 || matchedKeyword) {
+    if (alternativePressure && directMechanismMatches.length === 0) {
+      return {
+        stance: 'contradicts',
+        strength: 'weak',
+        claim: `Drug researcher found only partial mechanism language for ${proteinId}, while peer evidence already points to an alternative mechanism. This weakens the current drug-side hypothesis rather than supporting it.`,
+      };
+    }
     return {
       stance: 'supports',
       strength: 'moderate',
@@ -210,10 +177,17 @@ function detectDrugProteinSignal(
   }
 
   if (mechanismCount > 0 && diseaseIndicationHits.length > 0) {
+    if (alternativePressure) {
+      return {
+        stance: 'contradicts',
+        strength: 'moderate',
+        claim: `Drug researcher found a concrete mechanism description plus disease-aligned indication context for ${diseaseId ?? 'the queried disease'}, but it does not align with protein ${proteinId} and peer evidence points to a different mechanism. This is negative evidence against the current drug-side story.`,
+      };
+    }
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Drug researcher found a concrete mechanism description plus disease-aligned indication context for ${diseaseId ?? 'the queried disease'}, but no explicit protein-level match for ${proteinId}.`,
+      claim: `Drug researcher found a concrete mechanism description plus disease-aligned indication context for ${diseaseId ?? 'the queried disease'}, but no explicit protein-level match for ${proteinId}. This is not enough to support the triplet on the drug side.`,
     };
   }
 
@@ -221,31 +195,38 @@ function detectDrugProteinSignal(
     searchable.includes(normalizeText(keyword)),
   );
   if (mechanismCount > 0 && diseaseMatchedKeyword) {
+    if (alternativePressure) {
+      return {
+        stance: 'contradicts',
+        strength: 'weak',
+        claim: `Drug researcher linked the drug to disease-relevant context (${diseaseMatchedKeyword}), but the mechanism still does not align with ${proteinId} and peer evidence favors another mechanism. This counts against the current drug-side hypothesis.`,
+      };
+    }
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Drug researcher linked the drug to disease-relevant context (${diseaseMatchedKeyword}) while also providing a mechanism description, which is indirect but non-trivial support.`,
+      claim: `Drug researcher linked the drug to disease-relevant context (${diseaseMatchedKeyword}) while also providing a mechanism description, but this remains indirect and does not establish the queried drug-protein mechanism.`,
     };
   }
 
   if (diseaseIndicationHits.length > 0) {
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Drug researcher found disease-aligned indication context for ${diseaseId ?? 'the queried disease'} (${diseaseIndicationHits.slice(0, 3).join(', ')}), which is weak but usable drug-side support even without an explicit protein match.`,
+      claim: `Drug researcher found disease-aligned indication context for ${diseaseId ?? 'the queried disease'} (${diseaseIndicationHits.slice(0, 3).join(', ')}), but indication overlap without an explicit protein match should remain insufficient.`,
     };
   }
 
   if (mechanismCount > 0) {
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Drug researcher returned a concrete mechanism description for the queried drug, which is weak drug-side support even though the mechanism was not explicitly aligned to protein ${proteinId}.`,
+      claim: `Drug researcher returned a concrete mechanism description for the queried drug, but without explicit alignment to protein ${proteinId} it should remain insufficient.`,
     };
   }
 
   return {
-    stance: 'insufficient',
+    stance: 'contradicts',
     strength: 'weak',
     claim: `Researcher output does not provide direct mechanism or target evidence linking the queried drug to protein ${proteinId}.`,
   };
@@ -264,6 +245,40 @@ function primaryHypothesisStatement(
   );
 }
 
+function mergeResearchOutputs(
+  primaryResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
+  nodeResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
+): {
+  textSummary: string;
+  structured: Record<string, unknown>;
+} {
+  const primarySummary = getInformativeToolSummary(primaryResult);
+  const nodeSummary = getInformativeToolSummary(nodeResult);
+  const primaryStructured = getInformativeToolStructured(primaryResult);
+  const nodeStructured = getInformativeToolStructured(nodeResult);
+
+  return {
+    textSummary: [nodeSummary, primarySummary]
+      .filter((value) => value.trim() !== '')
+      .join(' '),
+    structured: {
+      local_node_context: nodeStructured,
+      ...(primaryStructured ?? {}),
+      node_context: nodeStructured,
+    },
+  };
+}
+
+function localNodeEvidenceSignal(
+  nodeResult: { status: string; structured: Record<string, unknown> | null },
+): Pick<EvidenceItem, 'stance' | 'strength'> {
+  const nodeFound = nodeResult.structured?.node_found === true;
+  if (nodeResult.status === 'ok' && nodeFound) {
+    return { stance: 'supports', strength: 'weak' };
+  }
+  return { stance: 'contradicts', strength: 'weak' };
+}
+
 export class DrugAgent {
   readonly agentId = 'drug_agent';
 
@@ -274,15 +289,15 @@ export class DrugAgent {
     hypotheses: HypothesisRecord[],
     roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
-    const drugIds = getDrugIds(sample);
-    const proteinId = getPrimaryProteinId(sample);
-    const diseaseId = getPrimaryDiseaseId(sample);
+    const drugIds = getEntityIds(sample, 'drug', 'drugs');
+    const proteinId = getPrimaryEntity(sample, 'protein');
+    const diseaseId = getPrimaryEntity(sample, 'disease');
     const plannerActions: PlannerAction[] = [];
     const evidenceItems: EvidenceItem[] = [];
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     for (const drugId of drugIds) {
-      const reviewContext: ResearchReviewContext = {
+      const baseReviewContext: ResearchReviewContext = {
         roundNumber: roundContext?.roundNumber ?? 1,
         focusMode:
           roundContext && roundContext.roundNumber > 1
@@ -291,11 +306,37 @@ export class DrugAgent {
         focalQuestion: roundContext?.focus[0],
         focus: roundContext?.focus ?? [],
         peerFindings: roundContext?.peerAssessmentSummaries ?? [],
+        peerEvidence: roundContext?.peerEvidenceDigest ?? [],
+        positiveEvidence: roundContext?.positiveEvidenceDigest ?? [],
+        negativeEvidence: roundContext?.negativeEvidenceDigest ?? [],
+        alternativeMechanismSignals:
+          roundContext?.alternativeMechanismSignals ?? [],
+        sharedEvidenceBoard: roundContext?.sharedEvidenceBoard,
+        roundObjective: roundContext?.roundObjective,
         hypothesisFocus: roundContext?.hypothesisFocus ?? [],
         activeHypothesisIds: roundContext?.activeHypothesisIds ?? [],
         targetDrugId: drugId,
         targetProteinId: proteinId,
         targetDiseaseId: diseaseId,
+      };
+
+      const nodeArguments = {
+        entity_type: 'drug',
+        entity_id: drugId,
+      };
+      const nodeResult = await this.toolAdapter.callTool(
+        'node_context',
+        nodeArguments,
+      );
+      const reviewContext: ResearchReviewContext = {
+        ...baseReviewContext,
+        localNodeSummary: nodeResult.textSummary,
+        localNodeStructured: nodeResult.structured ?? undefined,
+        localEvidencePriority: 'primary',
+      };
+      const researcherArguments = {
+        drugbank_id: drugId,
+        review_context: reviewContext,
       };
 
       const plannerAction: PlannerAction = {
@@ -306,113 +347,213 @@ export class DrugAgent {
         ),
         verificationGoal:
           roundContext && roundContext.hypothesisFocus.length > 0
-            ? `Round ${roundContext.roundNumber} hypothesis-driven re-check for drug ${drugId}: ${roundContext.hypothesisFocus.join(' | ')}`
+            ? `Round ${roundContext.roundNumber} drug-side review for ${drugId}: first ground the entity using local node context, then use external evidence to test ${roundContext.hypothesisFocus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
             : roundContext && roundContext.focus.length > 0
-              ? `Round ${roundContext.roundNumber} targeted re-check for drug ${drugId}: ${roundContext.focus.join(' | ')}`
+              ? `Round ${roundContext.roundNumber} targeted drug-side review for ${drugId}: first ground the entity using local node context, then use external evidence to test ${roundContext.focus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
               : proteinId !== undefined
-                ? `Check whether drug ${drugId} has direct mechanism or target support involving protein ${proteinId}.`
-                : `Check whether drug ${drugId} has drug-side mechanism evidence relevant to the current sample.`,
+                ? `First read the local node context for drug ${drugId}, then check whether it has biologically meaningful mechanism or target support involving protein ${proteinId}.`
+                : `First read the local node context for drug ${drugId}, then check whether it has biologically meaningful drug-side support relevant to the current sample.`,
         expectedEvidence: [
-          'direct drug-target evidence',
+          'local node description as the primary grounding source',
+          'drug-target or mechanism evidence',
           'mechanism-of-action description',
           'indication context',
+          'peer findings and prior positive/negative evidence',
         ],
         failureRule:
-          roundContext && roundContext.hypothesisFocus.length > 0
-            ? 'If the active hypothesis is not supported by drug-side mechanism evidence, do not keep reusing the same explanation; downgrade it or favor an alternative mechanism hypothesis.'
-            : 'If no direct drug-protein evidence is found, positive conclusions must remain low-confidence or insufficient.',
+          'After reviewing the available evidence and using your biological judgment, end this round with a binary 1/0 recommendation and a concise rationale.',
         toolCalls: [
           {
+            tool: 'node_context',
+            arguments: nodeArguments,
+          },
+          {
             tool: 'drug_researcher',
-            arguments: {
-              drugbank_id: drugId,
-              review_context: reviewContext,
-            },
+            arguments: researcherArguments,
           },
         ],
       };
       plannerActions.push(plannerAction);
 
-      const [result] = await executePlannerAction(plannerAction, {
-        researchToolAdapter: this.toolAdapter,
-      });
-
-      evidenceItems.push({
-        id: `drug-researcher-${sample.sampleIndex}-${drugId}`,
-        source: this.agentId,
-        toolName: result.toolName,
-        entityScope: proteinId ? [drugId, proteinId] : [drugId],
-        claim:
-          result.status === 'ok'
-            ? result.textSummary ||
-              `Drug researcher returned no summary for ${drugId}.`
-            : `Drug researcher failed for ${drugId}: ${result.error ?? 'unknown error'}`,
-        stance: result.status === 'ok' ? 'insufficient' : 'contradicts',
-        strength: result.status === 'ok' ? 'moderate' : 'weak',
-        structured: {
-          drugbankId: drugId,
-          proteinId,
-          result: result.structured,
-          status: result.status,
-        },
-      });
-
-      const heuristicSignal =
-        result.status === 'ok'
-          ? detectDrugProteinSignal(
-              result.textSummary,
+      const result = await this.toolAdapter.callTool(
+        'drug_researcher',
+        researcherArguments,
+      );
+      const mergedResult = mergeResearchOutputs(result, nodeResult);
+      const reasonerResult = await this.toolAdapter.callTool(
+        'biomedical_expert_reasoner',
+        {
+          role: 'drug',
+          review_context: reviewContext,
+          entity_context: {
+            relationshipType: sample.relationshipType,
+            drugbankId: drugId,
+            proteinId,
+            diseaseId,
+            localNodeContext: nodeResult.structured,
+          },
+          evidence_summary: mergedResult.textSummary,
+          evidence_structured: {
+            primary_local_node: nodeResult.structured,
+            researcher: result.structured,
+            node_context: nodeResult.structured,
+            fallback_heuristic: detectDrugProteinSignal(
+              mergedResult.textSummary,
               proteinId,
               diseaseId,
-              result.structured,
+              mergedResult.structured,
+              roundContext,
+            ),
+          },
+        },
+      );
+      const reasonedOutput = parseStructuredReasonerOutput(
+        reasonerResult.structured,
+      );
+
+      if (isInformativeToolResult(result)) {
+        evidenceItems.push({
+          id: `drug-researcher-${sample.sampleIndex}-${drugId}`,
+          source: this.agentId,
+          toolName: result.toolName,
+          entityScope: proteinId ? [drugId, proteinId] : [drugId],
+          claim:
+            result.textSummary ||
+            `Drug researcher returned no summary for ${drugId}.`,
+          stance: 'contradicts',
+          strength: 'moderate',
+          structured: {
+            drugbankId: drugId,
+            proteinId,
+            result: result.structured,
+            status: result.status,
+          },
+        });
+      }
+
+      if (isInformativeToolResult(nodeResult)) {
+        evidenceItems.push({
+          id: `drug-node-context-${sample.sampleIndex}-${drugId}`,
+          source: this.agentId,
+          toolName: nodeResult.toolName,
+          entityScope: [drugId],
+          claim:
+            nodeResult.textSummary ||
+            `Local node context returned no summary for ${drugId}.`,
+          ...localNodeEvidenceSignal(nodeResult),
+          structured: {
+            drugbankId: drugId,
+            result: nodeResult.structured,
+            status: nodeResult.status,
+          },
+        });
+      }
+
+      const heuristicSignal =
+        isInformativeToolResult(result)
+          ? detectDrugProteinSignal(
+              mergedResult.textSummary,
+              proteinId,
+              diseaseId,
+              mergedResult.structured,
+              roundContext,
             )
-          : {
-              stance: 'contradicts' as const,
-              strength: 'weak' as const,
-              claim: `Drug researcher execution failed, so drug-side direct evidence remains unavailable for ${drugId}.`,
-            };
+          : null;
 
       const mechanismSignal = heuristicSignal;
+      const finalOutput = reasonedOutput ?? mechanismSignal;
 
-      evaluationTrace.push({
-        id: `drug-trace-${sample.sampleIndex}-${drugId}`,
-        toolName: 'drug_researcher',
-        toolArguments: {
-          drugbank_id: drugId,
-          review_context: reviewContext,
-        },
-        entityScope: proteinId ? [drugId, proteinId] : [drugId],
-        rawToolOutput: result,
-        interpretedOutput: mechanismSignal,
-      });
+      if (isInformativeToolResult(result) && mechanismSignal) {
+        evaluationTrace.push({
+          id: `drug-trace-${sample.sampleIndex}-${drugId}`,
+          toolName: 'drug_researcher',
+          toolArguments: {
+            drugbank_id: drugId,
+            review_context: reviewContext,
+          },
+          entityScope: proteinId ? [drugId, proteinId] : [drugId],
+          rawToolOutput: result,
+          interpretedOutput: mechanismSignal,
+        });
+      }
 
-      evidenceItems.push({
-        id: `drug-mechanism-${sample.sampleIndex}-${drugId}`,
-        source: this.agentId,
-        toolName: 'drug_researcher_screen',
-        entityScope: proteinId ? [drugId, proteinId] : [drugId],
-        claim: mechanismSignal.claim,
-        stance: mechanismSignal.stance,
-        strength: mechanismSignal.strength,
-        structured: {
-          drugbankId: drugId,
-          proteinId,
-          researcherStatus: result.status,
-        },
-      });
+      if (isInformativeToolResult(nodeResult) && mechanismSignal) {
+        evaluationTrace.push({
+          id: `drug-node-trace-${sample.sampleIndex}-${drugId}`,
+          toolName: 'node_context',
+          toolArguments: {
+            entity_type: 'drug',
+            entity_id: drugId,
+          },
+          entityScope: [drugId],
+          rawToolOutput: nodeResult,
+          interpretedOutput: mechanismSignal,
+        });
+      }
+
+      if (reasonedOutput && finalOutput) {
+        evaluationTrace.push({
+          id: `drug-reasoner-trace-${sample.sampleIndex}-${drugId}`,
+          toolName: 'biomedical_expert_reasoner',
+          toolArguments: {
+            role: 'drug',
+            roundNumber: roundContext?.roundNumber ?? 1,
+            objective: roundContext?.roundObjective,
+            sharedEvidenceBoard: roundContext?.sharedEvidenceBoard,
+          },
+          entityScope: proteinId ? [drugId, proteinId] : [drugId],
+          rawToolOutput: reasonerResult,
+          interpretedOutput: finalOutput,
+        });
+      }
+
+      if (finalOutput) {
+        evidenceItems.push({
+          id: `drug-mechanism-${sample.sampleIndex}-${drugId}`,
+          source: this.agentId,
+          toolName: reasonedOutput
+            ? 'biomedical_expert_reasoner'
+            : 'drug_researcher_screen',
+          entityScope: proteinId ? [drugId, proteinId] : [drugId],
+          claim: finalOutput.claim,
+          stance: finalOutput.stance,
+          strength: finalOutput.strength,
+          structured: {
+            drugbankId: drugId,
+            proteinId,
+            researcherStatus: result.status,
+            nodeContextStatus: nodeResult.status,
+            reasonerStructured: reasonerResult.structured,
+          },
+        });
+      }
     }
 
-    const supportCount = evidenceItems.filter(
-      (item) => item.stance === 'supports',
-    ).length;
+    const reasonerVotes = evidenceItems
+      .map((item) => item.structured.reasonerStructured)
+      .filter(
+        (value): value is Record<string, unknown> =>
+          Boolean(value) && typeof value === 'object',
+      )
+      .map((structured) => structured.recommended_label)
+      .filter((value): value is 0 | 1 => value === 0 || value === 1);
+    const recommendedLabel =
+      reasonerVotes.length > 0
+        ? reasonerVotes.filter((value) => value === 1).length >
+          reasonerVotes.filter((value) => value === 0).length
+          ? 1
+          : 0
+        : binaryRecommendationFromEvidence(evidenceItems);
     const summary =
-      supportCount > 0
-        ? `Drug-side researcher found ${supportCount} task-shaped drug signal(s), prioritizing direct mechanism alignment and then disease-aligned mechanism context.`
-        : 'Drug-side researcher did not provide usable mechanism-aligned support for the queried drug-protein pair, so the drug side remains a blocking gap.';
+      recommendedLabel === 1
+        ? 'Drug-side expert votes 1 for the current hypothesis in this round.'
+        : 'Drug-side expert votes 0 for the current hypothesis in this round.';
 
     return {
       agentId: this.agentId,
       role: 'drug',
       roundNumber: roundContext?.roundNumber ?? 1,
+      recommendedLabel,
       summary,
       hypothesesTouched: roundContext?.activeHypothesisIds.length
         ? roundContext.activeHypothesisIds

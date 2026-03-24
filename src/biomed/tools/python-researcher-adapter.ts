@@ -30,9 +30,21 @@ export class PythonResearchToolAdapter implements ResearchToolAdapter {
     args: Record<string, unknown>,
   ): Promise<ResearchToolResult> {
     try {
+      const runtimeArgs: Record<string, unknown> = {
+        ...args,
+        workspace_root: this.config.workspaceRoot,
+      };
+      if (
+        toolName === 'graph_reasoner' ||
+        toolName === 'biomedical_expert_reasoner'
+      ) {
+        runtimeArgs.openrouter_api_key_path = this.config.openRouterApiKeyPath;
+        runtimeArgs.openrouter_base_url = this.config.openRouterBaseUrl;
+        runtimeArgs.openrouter_model = 'openai/gpt-4.1-mini';
+      }
       const { stdout } = await execFileAsync(
         this.config.pythonExecutable,
-        ['-c', PYTHON_TOOL_BRIDGE, toolName, JSON.stringify(args)],
+        ['-c', PYTHON_TOOL_BRIDGE, toolName, JSON.stringify(runtimeArgs)],
         {
           cwd: this.config.workspaceRoot,
           env: {

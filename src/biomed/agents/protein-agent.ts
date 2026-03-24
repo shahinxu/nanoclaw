@@ -9,14 +9,18 @@ import {
   ResearchReviewContext,
   ResearchToolAdapter,
 } from '../types.js';
-import { executePlannerAction } from '../plan-executor.js';
-
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
+import {
+  binaryRecommendationFromEvidence,
+  hasAlternativeMechanismPressure,
+  normalizeText,
+  parseStructuredReasonerOutput,
+} from '../assessment-utils.js';
+import { getEntityIds, getPrimaryEntity } from '../entity-utils.js';
+import {
+  getInformativeToolStructured,
+  getInformativeToolSummary,
+  isInformativeToolResult,
+} from '../tool-result-utils.js';
 
 function diseaseKeywords(diseaseId: string | undefined): string[] {
   if (!diseaseId) {
@@ -49,37 +53,12 @@ function diseaseKeywords(diseaseId: string | undefined): string[] {
   return [];
 }
 
-function getProteinIds(sample: BiomedTaskSample): string[] {
-  const values: string[] = [];
-  const singleProtein = sample.entityDict.protein;
-
-  if (typeof singleProtein === 'string') {
-    values.push(singleProtein);
-  }
-  if (Array.isArray(singleProtein)) {
-    values.push(...singleProtein);
-  }
-
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-}
-
-function getPrimaryDiseaseId(sample: BiomedTaskSample): string | undefined {
-  const disease = sample.entityDict.disease;
-
-  if (typeof disease === 'string') {
-    return disease.trim() || undefined;
-  }
-  if (Array.isArray(disease)) {
-    return disease.find((value) => value.trim() !== '')?.trim();
-  }
-
-  return undefined;
-}
 
 function detectProteinDiseaseSignal(
   textSummary: string,
   diseaseId: string | undefined,
   structured: Record<string, unknown> | null,
+  roundContext?: AgentRoundContext,
 ): {
   stance: EvidenceItem['stance'];
   strength: EvidenceItem['strength'];
@@ -87,7 +66,7 @@ function detectProteinDiseaseSignal(
 } {
   if (!diseaseId) {
     return {
-      stance: 'insufficient',
+      stance: 'contradicts',
       strength: 'weak',
       claim:
         'No disease was provided, so protein-disease relevance could not be checked.',
@@ -145,6 +124,7 @@ function detectProteinDiseaseSignal(
     typeof structured?.function_description === 'string'
       ? structured.function_description.trim()
       : '';
+  const alternativePressure = hasAlternativeMechanismPressure(roundContext);
 
   if (diseaseKeywordHits.length >= 2 || matchedPathways.length >= 2) {
     return {
@@ -159,6 +139,20 @@ function detectProteinDiseaseSignal(
     matchedPathways.length > 0 ||
     matchedProcesses.length > 0
   ) {
+    if (diseaseKeywordHits.length === 0 && matchedPathways.length === 0) {
+      if (alternativePressure) {
+        return {
+          stance: 'contradicts',
+          strength: 'weak',
+          claim: `Protein researcher found only broad disease-adjacent biology for ${diseaseId}, while peer evidence points to another mechanism or target axis. This counts against the current protein-disease hypothesis.`,
+        };
+      }
+      return {
+        stance: 'contradicts',
+        strength: 'weak',
+        claim: `Protein researcher found only broad disease-adjacent biology for ${diseaseId} via ${matchedProcesses.slice(0, 3).join(', ')}. Without disease-specific pathway or keyword alignment, this should remain insufficient.`,
+      };
+    }
     return {
       stance: 'supports',
       strength: 'moderate',
@@ -167,31 +161,45 @@ function detectProteinDiseaseSignal(
   }
 
   if (matchedKeyword) {
+    if (alternativePressure) {
+      return {
+        stance: 'contradicts',
+        strength: 'weak',
+        claim: `Protein researcher found only a single disease cue (${matchedKeyword}) for ${diseaseId}, while peer evidence favors another mechanism. This weakens the current protein-side story.`,
+      };
+    }
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Protein researcher output contains disease-relevant cue (${matchedKeyword}) consistent with disease ${diseaseId}. This supports protein-disease relevance only, not drug involvement.`,
+      claim: `Protein researcher output contains disease-relevant cue (${matchedKeyword}) consistent with disease ${diseaseId}, but a single cue without stronger pathway or disease-specific evidence should remain insufficient.`,
     };
   }
 
   if (biologicalProcesses.length > 0 && reactomePathways.length > 0) {
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Protein researcher returned both biological-process and pathway annotations for ${diseaseId}, which is weak but usable protein-side support even without an explicit disease keyword hit.`,
+      claim: `Protein researcher returned both biological-process and pathway annotations for ${diseaseId}, but without explicit disease-specific alignment this should remain insufficient.`,
     };
   }
 
   if (functionDescription) {
+    if (alternativePressure) {
+      return {
+        stance: 'contradicts',
+        strength: 'weak',
+        claim: `Protein researcher returned only generic function text for the queried protein, and peer evidence points to another mechanism. This is negative evidence for the current protein-disease hypothesis.`,
+      };
+    }
     return {
-      stance: 'supports',
+      stance: 'contradicts',
       strength: 'weak',
-      claim: `Protein researcher returned a concrete function description for the queried protein, so protein-side evidence remains weakly supportive rather than fully insufficient for disease ${diseaseId}.`,
+      claim: `Protein researcher returned a concrete function description for the queried protein, but generic function text alone should remain insufficient for disease ${diseaseId}.`,
     };
   }
 
   return {
-    stance: 'insufficient',
+    stance: 'contradicts',
     strength: 'weak',
     claim: `Protein researcher output does not provide direct disease-aligned evidence for ${diseaseId}. General biological plausibility should remain weak evidence.`,
   };
@@ -210,6 +218,40 @@ function primaryHypothesisStatement(
   );
 }
 
+function mergeResearchOutputs(
+  primaryResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
+  nodeResult: { toolName: string; status: 'ok' | 'error'; textSummary: string; structured: Record<string, unknown> | null },
+): {
+  textSummary: string;
+  structured: Record<string, unknown>;
+} {
+  const primarySummary = getInformativeToolSummary(primaryResult);
+  const nodeSummary = getInformativeToolSummary(nodeResult);
+  const primaryStructured = getInformativeToolStructured(primaryResult);
+  const nodeStructured = getInformativeToolStructured(nodeResult);
+
+  return {
+    textSummary: [nodeSummary, primarySummary]
+      .filter((value) => value.trim() !== '')
+      .join(' '),
+    structured: {
+      local_node_context: nodeStructured,
+      ...(primaryStructured ?? {}),
+      node_context: nodeStructured,
+    },
+  };
+}
+
+function localNodeEvidenceSignal(
+  nodeResult: { status: string; structured: Record<string, unknown> | null },
+): Pick<EvidenceItem, 'stance' | 'strength'> {
+  const nodeFound = nodeResult.structured?.node_found === true;
+  if (nodeResult.status === 'ok' && nodeFound) {
+    return { stance: 'supports', strength: 'weak' };
+  }
+  return { stance: 'contradicts', strength: 'weak' };
+}
+
 export class ProteinAgent {
   readonly agentId = 'protein_agent';
 
@@ -220,14 +262,14 @@ export class ProteinAgent {
     hypotheses: HypothesisRecord[],
     roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
-    const proteinIds = getProteinIds(sample);
-    const diseaseId = getPrimaryDiseaseId(sample);
+    const proteinIds = getEntityIds(sample, 'protein');
+    const diseaseId = getPrimaryEntity(sample, 'disease');
     const plannerActions: PlannerAction[] = [];
     const evidenceItems: EvidenceItem[] = [];
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     for (const proteinId of proteinIds) {
-      const reviewContext: ResearchReviewContext = {
+      const baseReviewContext: ResearchReviewContext = {
         roundNumber: roundContext?.roundNumber ?? 1,
         focusMode:
           roundContext && roundContext.roundNumber > 1
@@ -236,10 +278,36 @@ export class ProteinAgent {
         focalQuestion: roundContext?.focus[0],
         focus: roundContext?.focus ?? [],
         peerFindings: roundContext?.peerAssessmentSummaries ?? [],
+        peerEvidence: roundContext?.peerEvidenceDigest ?? [],
+        positiveEvidence: roundContext?.positiveEvidenceDigest ?? [],
+        negativeEvidence: roundContext?.negativeEvidenceDigest ?? [],
+        alternativeMechanismSignals:
+          roundContext?.alternativeMechanismSignals ?? [],
+        sharedEvidenceBoard: roundContext?.sharedEvidenceBoard,
+        roundObjective: roundContext?.roundObjective,
         hypothesisFocus: roundContext?.hypothesisFocus ?? [],
         activeHypothesisIds: roundContext?.activeHypothesisIds ?? [],
         targetProteinId: proteinId,
         targetDiseaseId: diseaseId,
+      };
+
+      const nodeArguments = {
+        entity_type: 'protein',
+        entity_id: proteinId,
+      };
+      const nodeResult = await this.toolAdapter.callTool(
+        'node_context',
+        nodeArguments,
+      );
+      const reviewContext: ResearchReviewContext = {
+        ...baseReviewContext,
+        localNodeSummary: nodeResult.textSummary,
+        localNodeStructured: nodeResult.structured ?? undefined,
+        localEvidencePriority: 'primary',
+      };
+      const researcherArguments = {
+        gene_symbol: proteinId,
+        review_context: reviewContext,
       };
 
       const plannerAction: PlannerAction = {
@@ -250,111 +318,209 @@ export class ProteinAgent {
         ),
         verificationGoal: diseaseId
           ? roundContext && roundContext.hypothesisFocus.length > 0
-            ? `Round ${roundContext.roundNumber} hypothesis-driven re-check for protein ${proteinId}: ${roundContext.hypothesisFocus.join(' | ')}`
+            ? `Round ${roundContext.roundNumber} protein-side review for protein ${proteinId}: first ground the entity using local node context, then test ${roundContext.hypothesisFocus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
             : roundContext && roundContext.focus.length > 0
-              ? `Round ${roundContext.roundNumber} targeted re-check for protein ${proteinId}: ${roundContext.focus.join(' | ')}`
-              : `Check whether protein ${proteinId} has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
-          : `Check whether protein ${proteinId} has disease-relevant evidence for the current sample.`,
+              ? `Round ${roundContext.roundNumber} targeted protein-side review for protein ${proteinId}: first ground the entity using local node context, then test ${roundContext.focus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
+              : `First read the local node context for protein ${proteinId}, then check whether it has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
+          : `First read the local node context for protein ${proteinId}, then check whether it has disease-relevant evidence for the current sample.`,
         expectedEvidence: [
+          'local node description as the primary grounding source',
           'protein function summary',
-          'disease-relevant pathway or phenotype signal',
-          'explicit note that protein relevance does not imply drug-protein support',
+          'disease-relevant pathway, phenotype, or mechanistic signal',
+          'protein relevance information',
+          'peer findings and prior positive/negative evidence',
         ],
         failureRule:
-          roundContext && roundContext.hypothesisFocus.length > 0
-            ? 'If the active hypothesis requires protein-disease alignment and the protein side cannot support it, do not keep the same hypothesis unchanged; downgrade it or favor an alternative pathway hypothesis.'
-            : 'If only general protein-disease plausibility is found, do not upgrade the full drug-protein-disease hypothesis to strong support.',
+          'After reviewing the available evidence and using your biological judgment, end this round with a binary 1/0 recommendation and a concise rationale.',
         toolCalls: [
           {
+            tool: 'node_context',
+            arguments: nodeArguments,
+          },
+          {
             tool: 'protein_researcher',
-            arguments: {
-              gene_symbol: proteinId,
-              review_context: reviewContext,
-            },
+            arguments: researcherArguments,
           },
         ],
       };
       plannerActions.push(plannerAction);
 
-      const [result] = await executePlannerAction(plannerAction, {
-        researchToolAdapter: this.toolAdapter,
-      });
-
-      evidenceItems.push({
-        id: `protein-researcher-${sample.sampleIndex}-${proteinId}`,
-        source: this.agentId,
-        toolName: result.toolName,
-        entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
-        claim:
-          result.status === 'ok'
-            ? result.textSummary ||
-              `Protein researcher returned no summary for ${proteinId}.`
-            : `Protein researcher failed for ${proteinId}: ${result.error ?? 'unknown error'}`,
-        stance: result.status === 'ok' ? 'insufficient' : 'contradicts',
-        strength: result.status === 'ok' ? 'moderate' : 'weak',
-        structured: {
-          proteinId,
-          diseaseId,
-          result: result.structured,
-          status: result.status,
+      const result = await this.toolAdapter.callTool(
+        'protein_researcher',
+        researcherArguments,
+      );
+      const mergedResult = mergeResearchOutputs(result, nodeResult);
+      const reasonerResult = await this.toolAdapter.callTool(
+        'biomedical_expert_reasoner',
+        {
+          role: 'protein',
+          review_context: reviewContext,
+          entity_context: {
+            relationshipType: sample.relationshipType,
+            proteinId,
+            diseaseId,
+            localNodeContext: nodeResult.structured,
+          },
+          evidence_summary: mergedResult.textSummary,
+          evidence_structured: {
+            primary_local_node: nodeResult.structured,
+            researcher: result.structured,
+            node_context: nodeResult.structured,
+            fallback_heuristic: detectProteinDiseaseSignal(
+              mergedResult.textSummary,
+              diseaseId,
+              mergedResult.structured,
+              roundContext,
+            ),
+          },
         },
-      });
+      );
+      const reasonedOutput = parseStructuredReasonerOutput(
+        reasonerResult.structured,
+      );
+
+      if (isInformativeToolResult(result)) {
+        evidenceItems.push({
+          id: `protein-researcher-${sample.sampleIndex}-${proteinId}`,
+          source: this.agentId,
+          toolName: result.toolName,
+          entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
+          claim:
+            result.textSummary ||
+            `Protein researcher returned no summary for ${proteinId}.`,
+          stance: 'contradicts',
+          strength: 'moderate',
+          structured: {
+            proteinId,
+            diseaseId,
+            result: result.structured,
+            status: result.status,
+          },
+        });
+      }
+
+      if (isInformativeToolResult(nodeResult)) {
+        evidenceItems.push({
+          id: `protein-node-context-${sample.sampleIndex}-${proteinId}`,
+          source: this.agentId,
+          toolName: nodeResult.toolName,
+          entityScope: [proteinId],
+          claim:
+            nodeResult.textSummary ||
+            `Local node context returned no summary for ${proteinId}.`,
+          ...localNodeEvidenceSignal(nodeResult),
+          structured: {
+            proteinId,
+            result: nodeResult.structured,
+            status: nodeResult.status,
+          },
+        });
+      }
 
       const heuristicSignal =
-        result.status === 'ok'
+        isInformativeToolResult(result)
           ? detectProteinDiseaseSignal(
-              result.textSummary,
+              mergedResult.textSummary,
               diseaseId,
-              result.structured,
+              mergedResult.structured,
+              roundContext,
             )
-          : {
-              stance: 'contradicts' as const,
-              strength: 'weak' as const,
-              claim: `Protein researcher execution failed, so protein-side verification remains unavailable for ${proteinId}.`,
-            };
+          : null;
 
       const diseaseSignal = heuristicSignal;
+      const finalOutput = reasonedOutput ?? diseaseSignal;
 
-      evaluationTrace.push({
-        id: `protein-trace-${sample.sampleIndex}-${proteinId}`,
-        toolName: 'protein_researcher',
-        toolArguments: {
-          gene_symbol: proteinId,
-          review_context: reviewContext,
-        },
-        entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
-        rawToolOutput: result,
-        interpretedOutput: diseaseSignal,
-      });
+      if (isInformativeToolResult(result) && diseaseSignal) {
+        evaluationTrace.push({
+          id: `protein-trace-${sample.sampleIndex}-${proteinId}`,
+          toolName: 'protein_researcher',
+          toolArguments: {
+            gene_symbol: proteinId,
+            review_context: reviewContext,
+          },
+          entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
+          rawToolOutput: result,
+          interpretedOutput: diseaseSignal,
+        });
+      }
 
-      evidenceItems.push({
-        id: `protein-disease-${sample.sampleIndex}-${proteinId}`,
-        source: this.agentId,
-        toolName: 'protein_researcher_screen',
-        entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
-        claim: diseaseSignal.claim,
-        stance: diseaseSignal.stance,
-        strength: diseaseSignal.strength,
-        structured: {
-          proteinId,
-          diseaseId,
-          researcherStatus: result.status,
-        },
-      });
+      if (isInformativeToolResult(nodeResult) && diseaseSignal) {
+        evaluationTrace.push({
+          id: `protein-node-trace-${sample.sampleIndex}-${proteinId}`,
+          toolName: 'node_context',
+          toolArguments: {
+            entity_type: 'protein',
+            entity_id: proteinId,
+          },
+          entityScope: [proteinId],
+          rawToolOutput: nodeResult,
+          interpretedOutput: diseaseSignal,
+        });
+      }
+
+      if (reasonedOutput && finalOutput) {
+        evaluationTrace.push({
+          id: `protein-reasoner-trace-${sample.sampleIndex}-${proteinId}`,
+          toolName: 'biomedical_expert_reasoner',
+          toolArguments: {
+            role: 'protein',
+            roundNumber: roundContext?.roundNumber ?? 1,
+            objective: roundContext?.roundObjective,
+            sharedEvidenceBoard: roundContext?.sharedEvidenceBoard,
+          },
+          entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
+          rawToolOutput: reasonerResult,
+          interpretedOutput: finalOutput,
+        });
+      }
+
+      if (finalOutput) {
+        evidenceItems.push({
+          id: `protein-disease-${sample.sampleIndex}-${proteinId}`,
+          source: this.agentId,
+          toolName: reasonedOutput
+            ? 'biomedical_expert_reasoner'
+            : 'protein_researcher_screen',
+          entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
+          claim: finalOutput.claim,
+          stance: finalOutput.stance,
+          strength: finalOutput.strength,
+          structured: {
+            proteinId,
+            diseaseId,
+            researcherStatus: result.status,
+            nodeContextStatus: nodeResult.status,
+            reasonerStructured: reasonerResult.structured,
+          },
+        });
+      }
     }
 
-    const supportCount = evidenceItems.filter(
-      (item) => item.stance === 'supports',
-    ).length;
+    const reasonerVotes = evidenceItems
+      .map((item) => item.structured.reasonerStructured)
+      .filter(
+        (value): value is Record<string, unknown> =>
+          Boolean(value) && typeof value === 'object',
+      )
+      .map((structured) => structured.recommended_label)
+      .filter((value): value is 0 | 1 => value === 0 || value === 1);
+    const recommendedLabel =
+      reasonerVotes.length > 0
+        ? reasonerVotes.filter((value) => value === 1).length >
+          reasonerVotes.filter((value) => value === 0).length
+          ? 1
+          : 0
+        : binaryRecommendationFromEvidence(evidenceItems);
     const summary =
-      supportCount > 0
-        ? `Protein-side researcher found ${supportCount} disease-aligned protein signal(s), with preference for explicit pathway and process alignment over generic plausibility.`
-        : 'Protein-side researcher did not provide usable disease-aligned protein evidence beyond broad plausibility.';
+      recommendedLabel === 1
+        ? 'Protein-side expert votes 1 for the current hypothesis in this round.'
+        : 'Protein-side expert votes 0 for the current hypothesis in this round.';
 
     return {
       agentId: this.agentId,
       role: 'protein',
       roundNumber: roundContext?.roundNumber ?? 1,
+      recommendedLabel,
       summary,
       hypothesesTouched: roundContext?.activeHypothesisIds.length
         ? roundContext.activeHypothesisIds
