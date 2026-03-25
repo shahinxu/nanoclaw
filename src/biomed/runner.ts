@@ -62,8 +62,13 @@ async function loadSharedNodeContext(
       entityType: 'disease' as const,
       entityId: getPrimaryEntity(sample, 'disease'),
     },
-  ].filter((item): item is { entityType: 'drug' | 'protein' | 'disease'; entityId: string } =>
-    Boolean(item.entityId),
+  ].filter(
+    (
+      item,
+    ): item is {
+      entityType: 'drug' | 'protein' | 'disease';
+      entityId: string;
+    } => Boolean(item.entityId),
   );
 
   const results = await Promise.all(

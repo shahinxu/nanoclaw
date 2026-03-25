@@ -89,7 +89,10 @@ async function mapWithConcurrency<T, U>(
   concurrency: number,
   worker: (value: T, index: number) => Promise<U>,
 ): Promise<U[]> {
-  const normalizedConcurrency = Math.max(1, Math.min(concurrency, values.length));
+  const normalizedConcurrency = Math.max(
+    1,
+    Math.min(concurrency, values.length),
+  );
   const results = new Array<U>(values.length);
   let nextIndex = 0;
 
@@ -209,7 +212,11 @@ function updateRunningCounts(
   return counts;
 }
 
-function renderProgressBar(completed: number, total: number, width = 24): string {
+function renderProgressBar(
+  completed: number,
+  total: number,
+  width = 24,
+): string {
   const safeTotal = Math.max(total, 1);
   const ratio = Math.min(Math.max(completed / safeTotal, 0), 1);
   const filled = Math.round(ratio * width);
