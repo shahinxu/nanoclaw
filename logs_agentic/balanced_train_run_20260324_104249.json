@@ -1,0 +1,59 @@
+{
+  "createdAt": "2026-03-24T14:42:49.970Z",
+  "dataDir": "/home/zhx/drug_agent/data_edge_train",
+  "relationshipType": "drug_protein_disease",
+  "selection": {
+    "mode": "first-balanced",
+    "perLabel": 1,
+    "total": 2,
+    "sampleIndices": [
+      0,
+      66998
+    ]
+  },
+  "summary": {
+    "total": 2,
+    "positiveCount": 1,
+    "negativeCount": 1,
+    "correct": 2,
+    "accuracy": 1,
+    "confusionMatrix": {
+      "tp": 1,
+      "tn": 1,
+      "fp": 0,
+      "fn": 0
+    }
+  },
+  "rows": [
+    {
+      "batchIndex": 0,
+      "sampleIndex": 0,
+      "groundTruth": 1,
+      "predictedLabel": 1,
+      "status": "supported",
+      "confidence": 0.8,
+      "relationshipType": "drug_protein_disease",
+      "entityDict": {
+        "drug": "DB12183",
+        "protein": "ERBB2",
+        "disease": "MONDO:0007254"
+      },
+      "rationale": "Majority vote supports the triplet: 4 agents voted 1 and 0 agents voted 0."
+    },
+    {
+      "batchIndex": 1,
+      "sampleIndex": 66998,
+      "groundTruth": 0,
+      "predictedLabel": 0,
+      "status": "refuted",
+      "confidence": 0.8,
+      "relationshipType": "drug_protein_disease",
+      "entityDict": {
+        "drug": "DB12183",
+        "protein": "ERBB2",
+        "disease": "MONDO:0005578"
+      },
+      "rationale": "Majority vote refutes the triplet: 3 agents voted 0 and 1 agents voted 1."
+    }
+  ]
+}

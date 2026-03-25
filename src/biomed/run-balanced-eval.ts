@@ -12,7 +12,9 @@ interface CliOptions {
   dataDir: string;
   graphDataDir: string;
   maxRounds: number;
+  concurrency: number;
   outputPath?: string;
+  streamOutputPath?: string;
 }
 
 interface EvalMetrics {
@@ -27,6 +29,14 @@ interface EvalMetrics {
   fn: number;
 }
 
+interface RunningCounts {
+  completed: number;
+  tp: number;
+  tn: number;
+  fp: number;
+  fn: number;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     relationshipType: 'drug_protein_disease',
@@ -35,6 +45,7 @@ function parseArgs(argv: string[]): CliOptions {
     dataDir: '/home/zhx/drug_agent/data_edge_test',
     graphDataDir: '/home/zhx/drug_agent/data_edge_train',
     maxRounds: 5,
+    concurrency: 4,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -58,13 +69,45 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (arg === '--maxRounds' && next) {
       options.maxRounds = Number.parseInt(next, 10);
       index += 1;
+    } else if (arg === '--concurrency' && next) {
+      options.concurrency = Number.parseInt(next, 10);
+      index += 1;
     } else if (arg === '--outputPath' && next) {
       options.outputPath = next;
+      index += 1;
+    } else if (arg === '--streamOutputPath' && next) {
+      options.streamOutputPath = next;
       index += 1;
     }
   }
 
   return options;
+}
+
+async function mapWithConcurrency<T, U>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  const normalizedConcurrency = Math.max(1, Math.min(concurrency, values.length));
+  const results = new Array<U>(values.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= values.length) {
+        return;
+      }
+      results[currentIndex] = await worker(values[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: normalizedConcurrency }, () => runWorker()),
+  );
+  return results;
 }
 
 function mulberry32(seed: number): () => number {
@@ -145,6 +188,70 @@ function computeMetrics(results: WorkflowResult[]): EvalMetrics {
   return { total, accuracy, precision, recall, f1, tp, tn, fp, fn };
 }
 
+function updateRunningCounts(
+  counts: RunningCounts,
+  result: WorkflowResult,
+): RunningCounts {
+  const gold = result.trace.groundTruth ?? 0;
+  const predicted = result.decision.label;
+
+  counts.completed += 1;
+  if (predicted === 1 && gold === 1) {
+    counts.tp += 1;
+  } else if (predicted === 0 && gold === 0) {
+    counts.tn += 1;
+  } else if (predicted === 1 && gold === 0) {
+    counts.fp += 1;
+  } else if (predicted === 0 && gold === 1) {
+    counts.fn += 1;
+  }
+
+  return counts;
+}
+
+function renderProgressBar(completed: number, total: number, width = 24): string {
+  const safeTotal = Math.max(total, 1);
+  const ratio = Math.min(Math.max(completed / safeTotal, 0), 1);
+  const filled = Math.round(ratio * width);
+  return `${'='.repeat(filled)}${'-'.repeat(Math.max(0, width - filled))}`;
+}
+
+function runningAccuracy(counts: RunningCounts): number {
+  if (counts.completed === 0) {
+    return 0;
+  }
+  return (counts.tp + counts.tn) / counts.completed;
+}
+
+function reportProgress(counts: RunningCounts, total: number): void {
+  const bar = renderProgressBar(counts.completed, total);
+  const accuracy = runningAccuracy(counts);
+  const line = `[${bar}] ${counts.completed}/${total} acc=${accuracy.toFixed(4)} tp=${counts.tp} tn=${counts.tn} fp=${counts.fp} fn=${counts.fn}`;
+
+  if (process.stdout.isTTY) {
+    process.stdout.write(`\r${line}`);
+    if (counts.completed === total) {
+      process.stdout.write('\n');
+    }
+    return;
+  }
+
+  console.log(line);
+}
+
+function summarizeResult(result: WorkflowResult) {
+  return {
+    sampleIndex: result.trace.sampleIndex,
+    groundTruth: result.trace.groundTruth,
+    predictedLabel: result.decision.label,
+    decisionStatus: result.decision.status,
+    decisionMode: result.decision.decisionMode,
+    confidence: result.decision.confidence,
+    rationale: result.decision.rationale,
+    entityDict: result.trace.entityDict,
+  };
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const loader = new CsvTaskLoader({
@@ -162,15 +269,39 @@ async function main(): Promise<void> {
     maxRounds: options.maxRounds,
   });
 
-  const results: WorkflowResult[] = [];
-  for (let index = 0; index < sampled.length; index += 1) {
-    const sample = sampled[index];
-    const result = await runner.runSample(sample);
-    results.push(result);
-    if ((index + 1) % 10 === 0 || index + 1 === sampled.length) {
-      console.log(`Completed ${index + 1}/${sampled.length} samples`);
-    }
+  const streamOutputPath = options.streamOutputPath
+    ? path.resolve(options.streamOutputPath)
+    : undefined;
+  if (streamOutputPath) {
+    fs.mkdirSync(path.dirname(streamOutputPath), { recursive: true });
+    fs.writeFileSync(streamOutputPath, '');
   }
+
+  const runningCounts: RunningCounts = {
+    completed: 0,
+    tp: 0,
+    tn: 0,
+    fp: 0,
+    fn: 0,
+  };
+  reportProgress(runningCounts, sampled.length);
+
+  const results = await mapWithConcurrency(
+    sampled,
+    options.concurrency,
+    async (sample) => {
+      const result = await runner.runSample(sample);
+      updateRunningCounts(runningCounts, result);
+      if (streamOutputPath) {
+        fs.appendFileSync(
+          streamOutputPath,
+          `${JSON.stringify(summarizeResult(result))}\n`,
+        );
+      }
+      reportProgress(runningCounts, sampled.length);
+      return result;
+    },
+  );
 
   const metrics = computeMetrics(results);
   const payload = {
@@ -178,17 +309,10 @@ async function main(): Promise<void> {
     sampleCount: options.sampleCount,
     seed: options.seed,
     maxRounds: options.maxRounds,
+    concurrency: options.concurrency,
     metrics,
-    samples: results.map((result) => ({
-      sampleIndex: result.trace.sampleIndex,
-      groundTruth: result.trace.groundTruth,
-      predictedLabel: result.decision.label,
-      decisionStatus: result.decision.status,
-      decisionMode: result.decision.decisionMode,
-      confidence: result.decision.confidence,
-      rationale: result.decision.rationale,
-      entityDict: result.trace.entityDict,
-    })),
+    streamOutputPath,
+    samples: results.map(summarizeResult),
   };
 
   console.log(JSON.stringify(payload, null, 2));

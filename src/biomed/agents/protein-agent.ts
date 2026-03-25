@@ -21,6 +21,10 @@ import {
   getInformativeToolSummary,
   isInformativeToolResult,
 } from '../tool-result-utils.js';
+import {
+  formatSharedNodeBundle,
+  getSharedNodeEntry,
+} from '../shared-node-context.js';
 
 function diseaseKeywords(diseaseId: string | undefined): string[] {
   if (!diseaseId) {
@@ -251,17 +255,6 @@ function mergeResearchOutputs(
   };
 }
 
-function localNodeEvidenceSignal(nodeResult: {
-  status: string;
-  structured: Record<string, unknown> | null;
-}): Pick<EvidenceItem, 'stance' | 'strength'> {
-  const nodeFound = nodeResult.structured?.node_found === true;
-  if (nodeResult.status === 'ok' && nodeFound) {
-    return { stance: 'supports', strength: 'weak' };
-  }
-  return { stance: 'contradicts', strength: 'weak' };
-}
-
 export class ProteinAgent {
   readonly agentId = 'protein_agent';
 
@@ -279,13 +272,19 @@ export class ProteinAgent {
     const evaluationTrace: AgentEvaluationTrace[] = [];
 
     for (const proteinId of proteinIds) {
+      const sharedNodeContext = roundContext?.sharedNodeContext;
+      const localNodeEntry = sharedNodeContext
+        ? getSharedNodeEntry(sharedNodeContext, 'protein', proteinId)
+        : undefined;
       const baseReviewContext: ResearchReviewContext = {
         roundNumber: roundContext?.roundNumber ?? 1,
         focusMode:
           roundContext && roundContext.roundNumber > 1
             ? 'disease_alignment'
             : 'broad',
-        focalQuestion: roundContext?.focus[0],
+        focalQuestion:
+          roundContext?.roundObjective.sharedDebateQuestion ??
+          roundContext?.focus[0],
         focus: roundContext?.focus ?? [],
         peerFindings: roundContext?.peerAssessmentSummaries ?? [],
         peerEvidence: roundContext?.peerEvidenceDigest ?? [],
@@ -299,20 +298,12 @@ export class ProteinAgent {
         activeHypothesisIds: roundContext?.activeHypothesisIds ?? [],
         targetProteinId: proteinId,
         targetDiseaseId: diseaseId,
+        sharedNodeContext,
       };
-
-      const nodeArguments = {
-        entity_type: 'protein',
-        entity_id: proteinId,
-      };
-      const nodeResult = await this.toolAdapter.callTool(
-        'node_context',
-        nodeArguments,
-      );
       const reviewContext: ResearchReviewContext = {
         ...baseReviewContext,
-        localNodeSummary: nodeResult.textSummary,
-        localNodeStructured: nodeResult.structured ?? undefined,
+        localNodeSummary: localNodeEntry?.summary,
+        localNodeStructured: localNodeEntry?.structured,
         localEvidencePriority: 'primary',
       };
       const researcherArguments = {
@@ -328,13 +319,14 @@ export class ProteinAgent {
         ),
         verificationGoal: diseaseId
           ? roundContext && roundContext.hypothesisFocus.length > 0
-            ? `Round ${roundContext.roundNumber} protein-side review for protein ${proteinId}: first ground the entity using local node context, then test ${roundContext.hypothesisFocus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
+            ? `Round ${roundContext.roundNumber} protein-side review for protein ${proteinId}: first read the shared node input for the whole hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire drug-protein-disease hyperedge. Speak as a first-person expert. ${roundContext.roundObjective.sharedDebateQuestion ? `Address this shared dispute directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}If this is not the first round, explicitly support or challenge another expert by role before ending with a binary vote. Use external evidence only to test the most important unresolved protein-side fact for ${roundContext.hypothesisFocus.join(' | ')}.`
             : roundContext && roundContext.focus.length > 0
-              ? `Round ${roundContext.roundNumber} targeted protein-side review for protein ${proteinId}: first ground the entity using local node context, then test ${roundContext.focus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0.`
-              : `First read the local node context for protein ${proteinId}, then check whether it has disease-relevant evidence for ${diseaseId}, while keeping drug involvement separate.`
-          : `First read the local node context for protein ${proteinId}, then check whether it has disease-relevant evidence for the current sample.`,
+              ? `Round ${roundContext.roundNumber} targeted protein-side review for protein ${proteinId}: first read the shared node input for the whole hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire hyperedge. Speak as a first-person expert. ${roundContext.roundObjective.sharedDebateQuestion ? `Address this shared dispute directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}If this is not the first round, explicitly support or challenge another expert by role before ending with a binary vote. Use external evidence only if needed to test ${roundContext.focus.join(' | ')}.`
+              : `First read the shared node input for protein ${proteinId}, disease ${diseaseId}, and drug ${getPrimaryEntity(sample, 'drug') ?? 'the queried drug'}. Form a provisional 0/1 prediction for the whole hyperedge, speak in first person as the protein-side expert, and use external evidence only to test whether the protein side has disease-relevant support for ${diseaseId}.`
+          : `First read the shared node input for the full hyperedge, form a provisional 0/1 prediction, speak in first person as the protein-side expert, and use external evidence only if needed to test the missing protein-side support.`,
         expectedEvidence: [
-          'local node description as the primary grounding source',
+          'shared node descriptions for drug, protein, and disease as the primary grounding source',
+          'a provisional whole-hyperedge 0/1 judgment before external retrieval',
           'protein function summary',
           'disease-relevant pathway, phenotype, or mechanistic signal',
           'protein relevance information',
@@ -343,10 +335,6 @@ export class ProteinAgent {
         failureRule:
           'After reviewing the available evidence and using your biological judgment, end this round with a binary 1/0 recommendation and a concise rationale.',
         toolCalls: [
-          {
-            tool: 'node_context',
-            arguments: nodeArguments,
-          },
           {
             tool: 'protein_researcher',
             arguments: researcherArguments,
@@ -359,7 +347,13 @@ export class ProteinAgent {
         'protein_researcher',
         researcherArguments,
       );
-      const mergedResult = mergeResearchOutputs(result, nodeResult);
+      const localNodeResult = {
+        toolName: 'shared_node_context',
+        status: 'ok' as const,
+        textSummary: localNodeEntry?.summary ?? '',
+        structured: localNodeEntry?.structured ?? null,
+      };
+      const mergedResult = mergeResearchOutputs(result, localNodeResult);
       const reasonerResult = await this.toolAdapter.callTool(
         'biomedical_expert_reasoner',
         {
@@ -369,13 +363,15 @@ export class ProteinAgent {
             relationshipType: sample.relationshipType,
             proteinId,
             diseaseId,
-            localNodeContext: nodeResult.structured,
+            localNodeContext: localNodeEntry?.structured,
+            sharedNodeContext,
           },
           evidence_summary: mergedResult.textSummary,
           evidence_structured: {
-            primary_local_node: nodeResult.structured,
+            primary_local_node: localNodeEntry?.structured,
             researcher: result.structured,
-            node_context: nodeResult.structured,
+            node_context: localNodeEntry?.structured,
+            shared_node_context: sharedNodeContext,
             fallback_heuristic: detectProteinDiseaseSignal(
               mergedResult.textSummary,
               diseaseId,
@@ -409,24 +405,6 @@ export class ProteinAgent {
         });
       }
 
-      if (isInformativeToolResult(nodeResult)) {
-        evidenceItems.push({
-          id: `protein-node-context-${sample.sampleIndex}-${proteinId}`,
-          source: this.agentId,
-          toolName: nodeResult.toolName,
-          entityScope: [proteinId],
-          claim:
-            nodeResult.textSummary ||
-            `Local node context returned no summary for ${proteinId}.`,
-          ...localNodeEvidenceSignal(nodeResult),
-          structured: {
-            proteinId,
-            result: nodeResult.structured,
-            status: nodeResult.status,
-          },
-        });
-      }
-
       const heuristicSignal = isInformativeToolResult(result)
         ? detectProteinDiseaseSignal(
             mergedResult.textSummary,
@@ -449,20 +427,6 @@ export class ProteinAgent {
           },
           entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
           rawToolOutput: result,
-          interpretedOutput: diseaseSignal,
-        });
-      }
-
-      if (isInformativeToolResult(nodeResult) && diseaseSignal) {
-        evaluationTrace.push({
-          id: `protein-node-trace-${sample.sampleIndex}-${proteinId}`,
-          toolName: 'node_context',
-          toolArguments: {
-            entity_type: 'protein',
-            entity_id: proteinId,
-          },
-          entityScope: [proteinId],
-          rawToolOutput: nodeResult,
           interpretedOutput: diseaseSignal,
         });
       }
@@ -498,7 +462,7 @@ export class ProteinAgent {
             proteinId,
             diseaseId,
             researcherStatus: result.status,
-            nodeContextStatus: nodeResult.status,
+            nodeContextStatus: localNodeEntry ? 'provided' : 'missing',
             reasonerStructured: reasonerResult.structured,
           },
         });

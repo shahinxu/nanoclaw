@@ -80,6 +80,18 @@ export interface ResearchToolResult {
   error?: string;
 }
 
+export interface SharedNodeContextEntry {
+  entityId: string;
+  summary: string;
+  structured?: Record<string, unknown>;
+}
+
+export interface SharedNodeContextBundle {
+  drug: SharedNodeContextEntry[];
+  protein: SharedNodeContextEntry[];
+  disease: SharedNodeContextEntry[];
+}
+
 export interface ResearchReviewContext {
   roundNumber: number;
   focusMode:
@@ -101,6 +113,7 @@ export interface ResearchReviewContext {
   targetDrugId?: string;
   targetProteinId?: string;
   targetDiseaseId?: string;
+  sharedNodeContext?: SharedNodeContextBundle;
   localNodeSummary?: string;
   localNodeStructured?: Record<string, unknown>;
   localEvidencePriority?: 'primary';
@@ -120,6 +133,8 @@ export interface RoundObjective {
   title: string;
   directive: string;
   responseRequirement: string;
+  sharedDebateQuestion?: string;
+  sharedHypothesisFocus?: string[];
   targetRoles: Array<'drug' | 'protein' | 'disease' | 'graph'>;
 }
 
@@ -171,6 +186,7 @@ export interface AgentRoundContext {
   alternativeMechanismSignals: string[];
   hypothesisFocus: string[];
   activeHypothesisIds: string[];
+  sharedNodeContext: SharedNodeContextBundle;
 }
 
 export interface AgentAssessment {

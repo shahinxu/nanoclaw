@@ -32,6 +32,7 @@ import {
   RoundDisagreement,
   SampleTraceRecord,
   SampleRoundRecord,
+  SharedNodeContextBundle,
   WorkflowResult,
 } from './types.js';
 
@@ -45,6 +46,52 @@ function dedupeStrings(values: string[]): string[] {
 
 function evidenceDigest(item: EvidenceItem): string {
   return `${item.source} ${item.stance}/${item.strength}: ${item.claim}`;
+}
+
+async function loadSharedNodeContext(
+  sample: BiomedTaskSample,
+  toolAdapter: ResearchToolAdapter,
+): Promise<SharedNodeContextBundle> {
+  const requests = [
+    { entityType: 'drug' as const, entityId: getPrimaryEntity(sample, 'drug') },
+    {
+      entityType: 'protein' as const,
+      entityId: getPrimaryEntity(sample, 'protein'),
+    },
+    {
+      entityType: 'disease' as const,
+      entityId: getPrimaryEntity(sample, 'disease'),
+    },
+  ].filter((item): item is { entityType: 'drug' | 'protein' | 'disease'; entityId: string } =>
+    Boolean(item.entityId),
+  );
+
+  const results = await Promise.all(
+    requests.map(async ({ entityType, entityId }) => ({
+      entityType,
+      entityId,
+      result: await toolAdapter.callTool('node_context', {
+        entity_type: entityType,
+        entity_id: entityId,
+      }),
+    })),
+  );
+
+  const sharedNodeContext: SharedNodeContextBundle = {
+    drug: [],
+    protein: [],
+    disease: [],
+  };
+
+  for (const { entityType, entityId, result } of results) {
+    sharedNodeContext[entityType].push({
+      entityId,
+      summary: result.textSummary,
+      structured: result.structured ?? undefined,
+    });
+  }
+
+  return sharedNodeContext;
 }
 
 function hasAlternativeMechanismCue(value: string): boolean {
@@ -114,34 +161,44 @@ function buildRoundObjective(
 ): RoundObjective {
   if (roundNumber === 1 || board.voteSummary.length === 0) {
     return {
-      title: 'Establish first-pass position',
+      title: 'Independent first-pass judgment',
       directive:
-        'Build the initial positive and negative case for the queried triplet, then cast a binary 0/1 vote.',
+        'Each expert should first judge the full drug-protein-disease hyperedge on its own terms, then name the single strongest reason for the current 0/1 vote.',
       responseRequirement:
-        'State a binary vote and name the strongest positive or negative claim you are relying on.',
+        'State a binary vote in expert voice and identify the strongest claim that is currently carrying your judgment.',
       targetRoles: [...ALL_AGENT_ROLES],
     };
   }
 
   if (board.status === 'conflict') {
+    const sharedDebateQuestion =
+      board.openQuestions[0] ??
+      board.contestedClaims[0] ??
+      'Which expert is currently missing the decisive fact for this triplet?';
     return {
-      title: 'Resolve the shared conflict',
+      title: 'Resolve the main disagreement',
       directive:
-        'All agents must address the same vote split and decide whether the strongest positive evidence or the strongest negative evidence better explains the queried triplet.',
+        'All experts must address the same unresolved disagreement, respond to one another directly, and decide whether the positive or negative story better explains the queried triplet overall.',
       responseRequirement:
-        'Cast a binary vote, explicitly respond to at least one opposing claim from the shared evidence board, and state whether your vote changed.',
+        'State a binary vote in first person, explicitly support or challenge at least one other expert by role, and say whether your vote changed.',
+      sharedDebateQuestion,
       targetRoles: [...ALL_AGENT_ROLES],
     };
   }
 
+  const sharedDebateQuestion =
+    board.negativeEvidence.length > 0
+      ? 'What concrete evidence would be strong enough to overturn the current negative consensus on this triplet?'
+      : 'What concrete evidence would be strong enough to overturn the current positive consensus on this triplet?';
   return {
     title: 'Stress-test the current consensus',
     directive:
       board.negativeEvidence.length > 0
-        ? 'The current board leans negative. Look for concrete evidence that could overturn that view before voting.'
-        : 'The current board leans positive. Look for concrete evidence that could break that view before voting.',
+        ? 'The board currently leans negative. Try to find a biologically serious reason that the shared negative view is wrong before voting again.'
+        : 'The board currently leans positive. Try to find a biologically serious reason that the shared positive view is wrong before voting again.',
     responseRequirement:
-      'Cast a binary vote and explain whether the shared board changed your confidence or not.',
+      'State a binary vote in first person and explain whether the shared board changed your confidence or left you unconvinced.',
+    sharedDebateQuestion,
     targetRoles: [...ALL_AGENT_ROLES],
   };
 }
@@ -179,29 +236,29 @@ function createRoleGapQuestion(
 
   if (role === 'drug') {
     if (persistenceCount >= 3) {
-      return `After repeated failed checks, should the debate abandon ${protein} as the primary target for ${drug} and search for an alternative mechanism that better explains ${disease}?`;
+      return `Should the team stop defending ${protein} as the main way ${drug} connects to ${disease}, and instead consider a narrower alternative mechanism?`;
     }
     if (persistenceCount === 2) {
-      return `What biological or pharmacological evidence would make the ${drug}-${protein} mechanism convincing for ${disease}?`;
+      return `What missing drug-side fact would make the ${drug}-${protein} story convincing for ${disease}?`;
     }
-    return `Should the drug-side expert currently vote 1 or 0 for a biologically meaningful ${drug}-${protein} mechanism relevant to ${disease}?`;
+    return `Does the drug-side case justify keeping a positive vote for a meaningful ${drug}-${protein} mechanism in ${disease}?`;
   }
   if (role === 'protein') {
     if (persistenceCount >= 3) {
-      return `If ${protein} still lacks disease-specific support for ${disease}, which adjacent pathway or substitute target would explain the signal better than the queried protein?`;
+      return `If ${protein} still looks weak for ${disease}, which adjacent pathway or substitute target explains the signal better?`;
     }
     if (persistenceCount === 2) {
-      return `Which phenotype, pathway, perturbation, or mechanistic clues link ${protein} to ${disease}?`;
+      return `What missing protein-side evidence would make ${protein} genuinely relevant to ${disease}?`;
     }
-    return `Should the protein-side expert currently vote 1 or 0 for ${protein} being relevant to ${disease}?`;
+    return `Does the protein-side case justify calling ${protein} relevant to ${disease}?`;
   }
   if (persistenceCount >= 3) {
-    return `If ${disease} still does not implicate ${protein}, should the debate treat the disease side as unresolved and stop preserving the same positive story?`;
+    return `If ${disease} still does not implicate ${protein}, should the team stop preserving the same positive story?`;
   }
   if (persistenceCount === 2) {
-    return `Which targets, treatments, biomarkers, or mechanistic clues connect ${disease} to ${protein}?`;
+    return `What missing disease-side fact would make ${protein} look disease-relevant in ${disease}?`;
   }
-  return `Should the disease-side expert currently vote 1 or 0 for ${protein} being supported by ${disease}?`;
+  return `Does the disease-side case actually support ${protein} as relevant to ${disease}?`;
 }
 
 function createRoleContradictionQuestion(
@@ -215,17 +272,17 @@ function createRoleContradictionQuestion(
 
   if (role === 'drug') {
     return persistenceCount >= 2
-      ? `Which specific claims contradict the ${drug}-${protein} mechanism for ${disease}, and do they rule out the current positive hypothesis?`
-      : `What evidence contradicts a mechanism or target link between ${drug} and ${protein}?`;
+      ? `Which claims most directly undercut the ${drug}-${protein} mechanism for ${disease}, and do they outweigh the current positive case?`
+      : `What evidence most directly argues against a meaningful link between ${drug} and ${protein}?`;
   }
   if (role === 'protein') {
     return persistenceCount >= 2
-      ? `Which specific findings argue against ${protein} being disease-relevant for ${disease}, rather than merely under-supported?`
-      : `What evidence contradicts ${protein} being disease-relevant for ${disease}?`;
+      ? `Which findings actively argue against ${protein} being disease-relevant for ${disease}, rather than merely leaving it under-supported?`
+      : `What evidence most directly argues against ${protein} being disease-relevant for ${disease}?`;
   }
   return persistenceCount >= 2
     ? `Which disease-side findings actively argue against ${protein} as a relevant target for ${disease}?`
-    : `What evidence contradicts ${disease} supporting ${protein} as disease-relevant?`;
+    : `What evidence most directly argues against ${disease} supporting ${protein} as disease-relevant?`;
 }
 
 function createCrossAgentMismatchQuestion(
@@ -238,12 +295,12 @@ function createCrossAgentMismatchQuestion(
   const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
 
   if (persistenceCount >= 3) {
-    return `After repeated disagreement, should the debate stop defending the direct ${drug}-${protein}-${disease} triplet and switch to a narrower alternative mechanism?`;
+    return `After repeated disagreement, should the team stop defending the direct ${drug}-${protein}-${disease} triplet and switch to a narrower alternative mechanism?`;
   }
   if (persistenceCount === 2) {
-    return `Which missing edge is preventing the ${drug}-${protein}-${disease} triplet from closing, and what additional evidence would make the current positive story convincing?`;
+    return `Which missing edge is preventing the ${drug}-${protein}-${disease} story from becoming convincing, and what evidence would settle it?`;
   }
-  return 'Why are some experts currently voting 1 while others are voting 0 on the same relationship?';
+  return 'Why are some experts currently voting 1 while others are voting 0 on the same triplet?';
 }
 
 function deriveRoundDisagreements(
@@ -461,6 +518,7 @@ function buildRoundContext(
   hypotheses: HypothesisRecord[],
   sharedEvidenceBoard: EvidenceBoard,
   roundObjective: RoundObjective,
+  sharedNodeContext: SharedNodeContextBundle,
 ): AgentRoundContext {
   const previousRound = rounds.at(-1);
   const contextDisagreements = previousRound?.disagreements ?? [];
@@ -513,10 +571,13 @@ function buildRoundContext(
       .map((item) => item.statement),
   ]).slice(0, 5);
   const focus = dedupeStrings([
+    roundObjective.sharedDebateQuestion ?? '',
     roundObjective.directive,
     ...prioritizedDisagreements.slice(0, 2).map((item) => item.question),
-    ...activeHypotheses.flatMap((item) => item.requiredChecks.slice(0, 1)),
   ]).slice(0, 3);
+  const hypothesisFocus = dedupeStrings([
+    ...activeHypotheses.map(hypothesisFocusText),
+  ]).slice(0, 2);
 
   return {
     roundNumber,
@@ -534,8 +595,9 @@ function buildRoundContext(
     positiveEvidenceDigest,
     negativeEvidenceDigest,
     alternativeMechanismSignals,
-    hypothesisFocus: activeHypotheses.map(hypothesisFocusText),
+    hypothesisFocus,
     activeHypothesisIds: activeHypotheses.map((item) => item.id),
+    sharedNodeContext,
   };
 }
 
@@ -624,6 +686,10 @@ export class BiomedWorkflowRunner {
   }
 
   async runSample(sample: BiomedTaskSample): Promise<WorkflowResult> {
+    const sharedNodeContext = await loadSharedNodeContext(
+      sample,
+      this.toolAdapter,
+    );
     let state = createHypothesisState(generateInitialHypotheses(sample));
 
     const drugAgent = new DrugAgent(this.toolAdapter);
@@ -665,6 +731,7 @@ export class BiomedWorkflowRunner {
           state.hypotheses,
           sharedEvidenceBoard,
           roundObjective,
+          sharedNodeContext,
         ),
       );
       const proteinAssessment = await proteinAgent.assess(
@@ -679,6 +746,7 @@ export class BiomedWorkflowRunner {
           state.hypotheses,
           sharedEvidenceBoard,
           roundObjective,
+          sharedNodeContext,
         ),
       );
       const diseaseAssessment = await diseaseAgent.assess(
@@ -693,6 +761,7 @@ export class BiomedWorkflowRunner {
           state.hypotheses,
           sharedEvidenceBoard,
           roundObjective,
+          sharedNodeContext,
         ),
       );
       const graphAssessment = await graphAgent.assess(
@@ -707,6 +776,7 @@ export class BiomedWorkflowRunner {
           state.hypotheses,
           sharedEvidenceBoard,
           roundObjective,
+          sharedNodeContext,
         ),
       );
 

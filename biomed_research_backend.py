@@ -154,6 +154,29 @@ def _list_text(values: List[str], empty: str = 'none') -> str:
     return ', '.join(cleaned) if cleaned else empty
 
 
+def _expert_role_label(role: str) -> str:
+    cleaned = str(role or '').strip().lower()
+    if cleaned in {'drug', 'protein', 'disease', 'graph'}:
+        return cleaned
+    return 'biomedical'
+
+
+def _default_first_person_claim(role: str, label: int) -> str:
+    role_label = _expert_role_label(role)
+    if label == 1:
+        return f'I currently vote 1 because the {role_label}-side evidence and biological reasoning still support the queried triplet.'
+    return f'I currently vote 0 because the {role_label}-side evidence and biological reasoning do not convincingly support the queried triplet.'
+
+
+def _ensure_first_person_claim(claim: Any, role: str, label: int) -> str:
+    cleaned = str(claim or '').strip()
+    if not cleaned:
+        return _default_first_person_claim(role, label)
+    if re.match(r'(?i)^i\b', cleaned):
+        return cleaned
+    return f"{'I currently vote 1 because' if label == 1 else 'I currently vote 0 because'} {cleaned}"
+
+
 def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[str]) -> str:
     if not review_context:
         return ''
@@ -166,8 +189,26 @@ def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[s
         segments.append(f'Primary local node grounding: {local_node_summary}')
     focus_mode = str(review_context.get('focusMode') or '').strip()
     focal_question = str(review_context.get('focalQuestion') or '').strip()
+    round_objective = review_context.get('roundObjective')
+    objective_title = ''
+    objective_directive = ''
+    objective_requirement = ''
+    objective_question = ''
+    if isinstance(round_objective, dict):
+        objective_title = str(round_objective.get('title') or '').strip()
+        objective_directive = str(round_objective.get('directive') or '').strip()
+        objective_requirement = str(round_objective.get('responseRequirement') or '').strip()
+        objective_question = str(round_objective.get('sharedDebateQuestion') or '').strip()
     if focus_mode:
         segments.append(f'Targeted review mode: {focus_mode}.')
+    if objective_title:
+        segments.append(f'Current debate objective: {objective_title}.')
+    if objective_directive:
+        segments.append(f'Debate directive: {objective_directive}')
+    if objective_requirement:
+        segments.append(f'Expected response style: {objective_requirement}')
+    if objective_question:
+        segments.append(f'Shared dispute question: {objective_question}')
     if focal_question:
         segments.append(f'Focused question: {focal_question}')
     focus = _non_empty_strings(review_context.get('focus'))
@@ -175,10 +216,10 @@ def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[s
         segments.append('Round focus: ' + ' | '.join(focus[:3]) + '.')
     peer_findings = _non_empty_strings(review_context.get('peerFindings'))
     if peer_findings:
-        segments.append('Peer concerns carried into this review: ' + ' | '.join(peer_findings[:2]))
+        segments.append('Other experts said: ' + ' | '.join(peer_findings[:2]))
     hypothesis_focus = _non_empty_strings(review_context.get('hypothesisFocus'))
     if hypothesis_focus:
-        segments.append('Active hypotheses for this round: ' + ' | '.join(hypothesis_focus[:2]))
+        segments.append('Background hypotheses still being tracked: ' + ' | '.join(hypothesis_focus[:2]))
     if notes:
         segments.extend([note for note in notes if note])
     return ' '.join(segment for segment in segments if segment)
@@ -357,17 +398,21 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     prompt_payload = {
-        'task': 'Decide whether the graph evidence supports or contradicts the queried drug-protein-disease triplet.',
+        'task': 'Act as the graph-side expert in the current debate and decide whether the graph evidence supports or contradicts the queried drug-protein-disease triplet.',
         'decision_space': {
             'recommended_label': '0 or 1 only',
             'stance': ['supports', 'contradicts'],
             'strength': ['strong', 'moderate', 'weak'],
         },
         'instructions': [
+            'Speak as an independent graph-side expert in first person.',
+            'Start from your own judgment of the full triplet before you lean on the shared board.',
             'Use the graph evidence, the shared evidence board, and your biological intuition about what the neighborhood implies for the queried triplet.',
             'You are allowed to use broad, indirect, or suggestive graph structure if it forms a biologically coherent story for the query.',
             'Absence of explicit local closure or exact triplet recovery is informative but not an automatic reason to vote 0.',
-            'Use the shared evidence board and round objective as real debate context.',
+            'Use the shared evidence board and round objective as real debate context rather than as a checklist.',
+            'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
+            'If a shared dispute question is present, address it directly.',
             'Do not hedge. Return one binary vote and one concise claim.',
         ],
         'review_context': review,
@@ -377,7 +422,7 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'recommended_label': '0 or 1',
             'stance': 'supports or contradicts',
             'strength': 'strong, moderate, or weak',
-            'claim': 'short explanation grounded in the graph evidence and the shared board',
+            'claim': 'a concise first-person expert statement; if debate context exists, explicitly support or challenge another expert by role',
         },
     }
 
@@ -390,7 +435,7 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical graph debate agent. Use graph structure flexibly and intelligently rather than as a rigid rule system. Output valid JSON only.',
+                    'content': 'You are a biomedical graph debate agent. Speak like an expert in an active multi-expert discussion. Use graph structure flexibly and intelligently rather than as a rigid rule system. Your claim must be in first person, and when relevant you should refer to other experts as the drug-side, protein-side, disease-side, or graph-side expert. Output valid JSON only.',
                 },
                 {
                     'role': 'user',
@@ -456,14 +501,10 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     strength = parsed.get('strength')
     if strength not in ('strong', 'moderate', 'weak'):
         strength = 'moderate' if label == 1 else 'weak'
-    claim = str(parsed.get('claim') or '').strip() or (
-        'The graph-side model judged the graph evidence as supportive.'
-        if label == 1
-        else 'The graph-side model judged the graph evidence as insufficient or contradictory.'
-    )
+    claim = _ensure_first_person_claim(parsed.get('claim'), 'graph', label)
 
     return {
-        'text_summary': f'[graph_reasoner] The model voted {label} based on graph evidence and the shared evidence board.',
+        'text_summary': f'[graph_reasoner] Graph-side expert vote {label}: {claim}',
         'structured': {
             'recommended_label': label,
             'stance': stance,
@@ -500,19 +541,23 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     prompt_payload = {
-        'task': f'Decide whether the {role}-side expert should vote 1 or 0 on the queried drug-protein-disease triplet.',
+        'task': f'Act as the {role}-side expert in the current debate and decide whether you should vote 1 or 0 on the queried drug-protein-disease triplet.',
         'decision_space': {
             'recommended_label': '0 or 1 only',
             'stance': ['supports', 'contradicts'],
             'strength': ['strong', 'moderate', 'weak'],
         },
         'instructions': [
+            'Speak as an independent expert in first person.',
+            'Start by judging the whole queried triplet, not just one local fragment of evidence.',
             'Start from the local node context when it is available. Treat it as the primary grounding source for entity identity, aliases, and baseline biology before weighing external API evidence.',
             'Use your biomedical knowledge and reasoning as fully as possible, together with the retrieved evidence.',
             'There is no requirement that supporting evidence be direct, explicit, non-generic, or fully complete before you can vote 1.',
             'Broad physiology, pharmacology, disease mechanism, target-class knowledge, alias resolution, and mechanistic analogy are all valid forms of support if they make biological sense for the queried triplet.',
             'Absence of an exact string match or an explicitly named direct interaction is not by itself a reason to vote 0.',
             'Weigh retrieved evidence, shared debate context, and your own biological judgment together, then decide which side is more convincing overall.',
+            'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
+            'If a shared dispute question is present, address it directly.',
             'Only vote 0 when the total biological story is genuinely unconvincing, contradictory, or better explained by another mechanism.',
             'Separate retrieved evidence from your knowledge-based inference in the JSON fields so the reasoning remains auditable.',
             'Return one binary vote and one concise claim only.',
@@ -525,7 +570,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'recommended_label': '0 or 1',
             'stance': 'supports or contradicts',
             'strength': 'strong, moderate, or weak',
-            'claim': 'short explanation integrating retrieved evidence and biomedical reasoning',
+            'claim': 'a concise first-person expert statement integrating retrieved evidence and biomedical reasoning; if debate context exists, explicitly support or challenge another expert by role',
             'retrieved_evidence_basis': ['short bullets naming the concrete retrieved facts actually used'],
             'knowledge_based_inference': 'short note describing the model-based biomedical inference used, or empty string',
         },
@@ -540,7 +585,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist, not like a rigid rule checker. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
+                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist in an active multi-expert discussion, not like a rigid rule checker. Speak in first person. When relevant, refer to peers as the drug-side, protein-side, disease-side, or graph-side expert and explicitly agree or disagree with them. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
                 },
                 {
                     'role': 'user',
@@ -612,11 +657,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     strength = parsed.get('strength')
     if strength not in ('strong', 'moderate', 'weak'):
         strength = 'moderate' if label == 1 else 'weak'
-    claim = str(parsed.get('claim') or '').strip() or (
-        f'The {role}-side model judged the biomedical evidence and reasoning as supportive.'
-        if label == 1
-        else f'The {role}-side model judged the biomedical evidence and reasoning as insufficient or contradictory.'
-    )
+    claim = _ensure_first_person_claim(parsed.get('claim'), role, label)
     retrieved_basis = parsed.get('retrieved_evidence_basis')
     if not isinstance(retrieved_basis, list):
         retrieved_basis = []
@@ -626,7 +667,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     knowledge_based_inference = str(parsed.get('knowledge_based_inference') or '').strip()
 
     return {
-        'text_summary': f'[biomedical_expert_reasoner] The {role}-side model voted {label} using retrieved evidence plus biomedical reasoning.',
+        'text_summary': f'[biomedical_expert_reasoner] {role.capitalize()}-side expert vote {label}: {claim}',
         'structured': {
             'recommended_label': label,
             'stance': stance,

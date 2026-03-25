@@ -14,6 +14,7 @@ import {
 } from '../assessment-utils.js';
 import { getPrimaryEntity } from '../entity-utils.js';
 import { executePlannerAction } from '../plan-executor.js';
+import { formatSharedNodeBundle } from '../shared-node-context.js';
 import { isInformativeToolResult } from '../tool-result-utils.js';
 import { LocalGraphTool } from '../tools/local-graph-tool.js';
 
@@ -41,11 +42,13 @@ export class GraphAgent {
         'The queried drug-protein-disease relationship exists.',
       verificationGoal:
         roundContext && roundContext.hypothesisFocus.length > 0
-          ? `Use neighboring hyperedges to test the active hypotheses: ${roundContext.hypothesisFocus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0 using graph evidence plus the shared evidence board.`
+          ? `First read the shared node input for the full hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire drug-protein-disease hyperedge. Speak as a first-person graph expert. ${roundContext.roundObjective.sharedDebateQuestion ? `Address this shared dispute directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}If this is not the first round, explicitly support or challenge another expert by role before ending with a binary vote. After that, use neighboring hyperedges only to test ${roundContext.hypothesisFocus.join(' | ')}.`
           : roundContext && roundContext.focus.length > 0
-            ? `Use neighboring hyperedges to probe unresolved graph structure: ${roundContext.focus.join(' | ')}. Shared objective: ${roundContext.roundObjective.title}. Decide whether your current vote is 1 or 0 using graph evidence plus the shared evidence board.`
-            : 'Use neighboring positive hyperedges to test whether the triplet sits inside a supportive local graph neighborhood.',
+            ? `First read the shared node input for the full hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire hyperedge. Speak as a first-person graph expert. ${roundContext.roundObjective.sharedDebateQuestion ? `Address this shared dispute directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}If this is not the first round, explicitly support or challenge another expert by role before ending with a binary vote. Use neighboring hyperedges only to probe ${roundContext.focus.join(' | ')}.`
+            : 'First read the shared node input for the full hyperedge, form a provisional 0/1 prediction, speak in first person as the graph-side expert, and use neighboring positive hyperedges only if needed to test whether the triplet sits inside a supportive local graph neighborhood.',
       expectedEvidence: [
+        'shared node descriptions for drug, protein, and disease as the primary grounding source',
+        'a provisional whole-hyperedge 0/1 judgment before graph retrieval',
         'shared drug-protein neighborhood',
         'shared drug-disease neighborhood',
         'shared protein-disease neighborhood',
@@ -146,7 +149,9 @@ export class GraphAgent {
         review_context: {
           roundNumber: roundContext?.roundNumber ?? 1,
           focusMode: 'broad',
-          focalQuestion: roundContext?.focus[0],
+          focalQuestion:
+            roundContext?.roundObjective.sharedDebateQuestion ??
+            roundContext?.focus[0],
           focus: roundContext?.focus ?? [],
           peerFindings: roundContext?.peerAssessmentSummaries ?? [],
           peerEvidence: roundContext?.peerEvidenceDigest ?? [],
@@ -158,6 +163,7 @@ export class GraphAgent {
           roundObjective: roundContext?.roundObjective,
           hypothesisFocus: roundContext?.hypothesisFocus ?? [],
           activeHypothesisIds: roundContext?.activeHypothesisIds ?? [],
+          sharedNodeContext: roundContext?.sharedNodeContext,
           targetDrugId: drug,
           targetProteinId: protein,
           targetDiseaseId: disease,
