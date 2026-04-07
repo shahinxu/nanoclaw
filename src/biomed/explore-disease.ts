@@ -55,12 +55,25 @@ function parseArgs(argv: string[]): CliOptions {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = argv[i + 1];
-    if (arg === '--diseaseId' && next) { opts.diseaseId = next; i += 1; }
-    else if (arg === '--trainingDir' && next) { opts.trainingDir = next; i += 1; }
-    else if (arg === '--maxRounds' && next) { opts.maxRounds = Number.parseInt(next, 10); i += 1; }
-    else if (arg === '--concurrency' && next) { opts.concurrency = Number.parseInt(next, 10); i += 1; }
-    else if (arg === '--topK' && next) { opts.topK = Number.parseInt(next, 10); i += 1; }
-    else if (arg === '--outputPath' && next) { opts.outputPath = next; i += 1; }
+    if (arg === '--diseaseId' && next) {
+      opts.diseaseId = next;
+      i += 1;
+    } else if (arg === '--trainingDir' && next) {
+      opts.trainingDir = next;
+      i += 1;
+    } else if (arg === '--maxRounds' && next) {
+      opts.maxRounds = Number.parseInt(next, 10);
+      i += 1;
+    } else if (arg === '--concurrency' && next) {
+      opts.concurrency = Number.parseInt(next, 10);
+      i += 1;
+    } else if (arg === '--topK' && next) {
+      opts.topK = Number.parseInt(next, 10);
+      i += 1;
+    } else if (arg === '--outputPath' && next) {
+      opts.outputPath = next;
+      i += 1;
+    }
   }
   return opts;
 }
@@ -71,18 +84,38 @@ function parseArgs(argv: string[]): CliOptions {
 
 const HIGH_QUALITY_PROTEINS = new Set([
   // JAK / TYK2 axis
-  'JAK1', 'JAK2', 'JAK3', 'TYK2',
+  'JAK1',
+  'JAK2',
+  'JAK3',
+  'TYK2',
   // PDE4 axis
-  'PDE4A', 'PDE4B', 'PDE4C', 'PDE4D',
+  'PDE4A',
+  'PDE4B',
+  'PDE4C',
+  'PDE4D',
   // Innate immune / co-stimulation
-  'SYK', 'IRAK4', 'TLR7', 'TLR9', 'C5AR1',
+  'SYK',
+  'IRAK4',
+  'TLR7',
+  'TLR9',
+  'C5AR1',
 ]);
 
 // Priority order for picking the single most representative protein per drug.
 const PROTEIN_PRIORITY = [
-  'JAK1', 'TYK2', 'JAK2', 'JAK3',
-  'PDE4B', 'PDE4A', 'PDE4C', 'PDE4D',
-  'SYK', 'IRAK4', 'TLR7', 'TLR9', 'C5AR1',
+  'JAK1',
+  'TYK2',
+  'JAK2',
+  'JAK3',
+  'PDE4B',
+  'PDE4A',
+  'PDE4C',
+  'PDE4D',
+  'SYK',
+  'IRAK4',
+  'TLR7',
+  'TLR9',
+  'C5AR1',
 ];
 
 function pickTopProtein(proteins: string[]): string {
@@ -93,9 +126,15 @@ function pickTopProtein(proteins: string[]): string {
 }
 
 function getMechanismAxis(proteins: string[]): string {
-  const jakHits = proteins.filter(p => ['JAK1','JAK2','JAK3','TYK2'].includes(p));
-  const pde4Hits = proteins.filter(p => ['PDE4A','PDE4B','PDE4C','PDE4D'].includes(p));
-  const immuneHits = proteins.filter(p => ['SYK','IRAK4','TLR7','TLR9','C5AR1'].includes(p));
+  const jakHits = proteins.filter((p) =>
+    ['JAK1', 'JAK2', 'JAK3', 'TYK2'].includes(p),
+  );
+  const pde4Hits = proteins.filter((p) =>
+    ['PDE4A', 'PDE4B', 'PDE4C', 'PDE4D'].includes(p),
+  );
+  const immuneHits = proteins.filter((p) =>
+    ['SYK', 'IRAK4', 'TLR7', 'TLR9', 'C5AR1'].includes(p),
+  );
   const axes: string[] = [];
   if (jakHits.length > 0) axes.push(`JAK/TYK2(${jakHits.join('+')})`);
   if (pde4Hits.length > 0) axes.push(`PDE4(${pde4Hits.join('+')})`);
@@ -128,7 +167,10 @@ async function discoverCandidates(
 
   // We go through order_3.csv which holds drug_protein_disease edges.
   const edgesFile = path.join(trainingDir, 'order_3.csv');
-  const rl = readline.createInterface({ input: createReadStream(edgesFile), crlfDelay: Infinity });
+  const rl = readline.createInterface({
+    input: createReadStream(edgesFile),
+    crlfDelay: Infinity,
+  });
 
   for await (const line of rl) {
     const parts = line.split(',');
@@ -143,7 +185,10 @@ async function discoverCandidates(
   }
 
   // Second pass: collect drugs that hit HQ proteins, exclude known positives.
-  const rl2 = readline.createInterface({ input: createReadStream(edgesFile), crlfDelay: Infinity });
+  const rl2 = readline.createInterface({
+    input: createReadStream(edgesFile),
+    crlfDelay: Infinity,
+  });
 
   for await (const line of rl2) {
     const parts = line.split(',');
@@ -173,7 +218,9 @@ async function discoverCandidates(
 
   // Sort by mechanism breadth desc, then support count desc.
   candidates.sort((a, b) =>
-    b.breadth !== a.breadth ? b.breadth - a.breadth : b.supportCount - a.supportCount,
+    b.breadth !== a.breadth
+      ? b.breadth - a.breadth
+      : b.supportCount - a.supportCount,
   );
 
   return candidates;
@@ -231,16 +278,20 @@ async function mapWithConcurrency<T, U>(
 
 function summarizeVotes(result: WorkflowResult) {
   const experts = (result.trace.assessments ?? []).filter(
-    a => a.role !== 'arbiter',
+    (a) => a.role !== 'arbiter',
   );
-  const pos = experts.filter(a => a.recommendedLabel === 1).length;
-  const neg = experts.filter(a => a.recommendedLabel === 0).length;
+  const pos = experts.filter((a) => a.recommendedLabel === 1).length;
+  const neg = experts.filter((a) => a.recommendedLabel === 0).length;
   return {
     positiveVotes: pos,
     negativeVotes: neg,
     expertCount: experts.length,
     positiveVoteProb: experts.length > 0 ? pos / experts.length : 0.5,
-    votesByRole: experts.map(a => ({ role: a.role, label: a.recommendedLabel, summary: a.summary })),
+    votesByRole: experts.map((a) => ({
+      role: a.role,
+      label: a.recommendedLabel,
+      summary: a.summary,
+    })),
   };
 }
 
@@ -253,17 +304,23 @@ async function main() {
 
   console.log(`\n=== Explore Disease: ${opts.diseaseId} ===`);
   console.log(`Training dir: ${opts.trainingDir}`);
-  console.log(`maxRounds=${opts.maxRounds}  concurrency=${opts.concurrency}  topK=${opts.topK || 'all'}\n`);
+  console.log(
+    `maxRounds=${opts.maxRounds}  concurrency=${opts.concurrency}  topK=${opts.topK || 'all'}\n`,
+  );
 
   // Step 1: Discover novel candidates
   console.log('Discovering novel candidates from training graph...');
   let candidates = await discoverCandidates(opts.trainingDir, opts.diseaseId);
-  console.log(`Found ${candidates.length} novel candidates using high-quality mechanism axes.`);
+  console.log(
+    `Found ${candidates.length} novel candidates using high-quality mechanism axes.`,
+  );
   if (opts.topK > 0) {
     candidates = candidates.slice(0, opts.topK);
     console.log(`Limiting to top ${opts.topK} by mechanism breadth.`);
   }
-  console.log(`Running agentic evaluation on ${candidates.length} candidates...\n`);
+  console.log(
+    `Running agentic evaluation on ${candidates.length} candidates...\n`,
+  );
 
   // Step 2: Build runner
   const runner = new BiomedWorkflowRunner({
@@ -310,7 +367,11 @@ async function main() {
 
   for (const { candidate, result, error } of runResults) {
     if (error || !result) {
-      errors.push({ drugId: candidate.drugId, mechanismAxis: candidate.mechanismAxis, error });
+      errors.push({
+        drugId: candidate.drugId,
+        mechanismAxis: candidate.mechanismAxis,
+        error,
+      });
       continue;
     }
     const votes = summarizeVotes(result);
@@ -340,7 +401,10 @@ async function main() {
 
   // Sort positives by confidence desc, then positive vote prob desc.
   (positives as Array<{ confidence: number; positiveVoteProb: number }>).sort(
-    (a, b) => b.confidence !== a.confidence ? b.confidence - a.confidence : b.positiveVoteProb - a.positiveVoteProb,
+    (a, b) =>
+      b.confidence !== a.confidence
+        ? b.confidence - a.confidence
+        : b.positiveVoteProb - a.positiveVoteProb,
   );
 
   const output = {
@@ -365,21 +429,28 @@ async function main() {
   console.log(`Errors              : ${errors.length}`);
   console.log(`\nTop predicted positive candidates:`);
 
-  for (const entry of (positives as Array<{
-    drugId: string; mechanismAxis: string; predictedLabel: number;
-    confidence: number; positiveVoteProb: number;
-    positiveVotes: number; expertCount: number; rationale: string;
-  }>).slice(0, 10)) {
+  for (const entry of (
+    positives as Array<{
+      drugId: string;
+      mechanismAxis: string;
+      predictedLabel: number;
+      confidence: number;
+      positiveVoteProb: number;
+      positiveVotes: number;
+      expertCount: number;
+      rationale: string;
+    }>
+  ).slice(0, 10)) {
     console.log(
       `  ${entry.drugId}  label=${entry.predictedLabel}  conf=${entry.confidence.toFixed(2)}` +
-      `  votes=${entry.positiveVotes}/${entry.expertCount}  axis=${entry.mechanismAxis}`,
+        `  votes=${entry.positiveVotes}/${entry.expertCount}  axis=${entry.mechanismAxis}`,
     );
     console.log(`    ${entry.rationale}`);
   }
   console.log(`\nFull results written to: ${opts.outputPath}`);
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });

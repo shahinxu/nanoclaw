@@ -188,7 +188,10 @@ function computeAuroc(labels: number[], scores: number[]): number | null {
   let index = 0;
   while (index < pairs.length) {
     let end = index;
-    while (end + 1 < pairs.length && pairs[end + 1].score === pairs[index].score) {
+    while (
+      end + 1 < pairs.length &&
+      pairs[end + 1].score === pairs[index].score
+    ) {
       end += 1;
     }
     const count = end - index + 1;

@@ -159,7 +159,10 @@ export class SideeffectAgent {
         .map((entry) => entry.summary)
         .filter((s): s is string => Boolean(s) && s.trim() !== '');
       const drugNodeText = drugNodeSummaries.join(' ');
-      const basemerged = mergeResearchOutputs(researcherResult, localNodeResult);
+      const basemerged = mergeResearchOutputs(
+        researcherResult,
+        localNodeResult,
+      );
       const mergedResult = {
         ...basemerged,
         textSummary: [drugNodeText, basemerged.textSummary]

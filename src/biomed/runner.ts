@@ -234,7 +234,7 @@ async function buildRoundObjectiveWithLLM(
             summarizePeerAssessment(item),
           ),
         }
-        : undefined,
+      : undefined,
   });
 
   if (plannerResult.status !== 'ok') {
@@ -270,20 +270,22 @@ async function buildRoundObjectiveWithLLM(
   }
 
   const allowed = new Set(allRoles);
-  const parsedTargetRoles = [...new Set(
-    targetRolesRaw
-      .map((item) => String(item || '').trim())
-      .filter(
-        (item): item is ActiveAgentRole =>
-          item === 'drug' ||
-          item === 'protein' ||
-          item === 'disease' ||
-          item === 'sideeffect' ||
-          item === 'cellline' ||
-          item === 'graph',
-      )
-      .filter((role) => allowed.has(role)),
-  )];
+  const parsedTargetRoles = [
+    ...new Set(
+      targetRolesRaw
+        .map((item) => String(item || '').trim())
+        .filter(
+          (item): item is ActiveAgentRole =>
+            item === 'drug' ||
+            item === 'protein' ||
+            item === 'disease' ||
+            item === 'sideeffect' ||
+            item === 'cellline' ||
+            item === 'graph',
+        )
+        .filter((role) => allowed.has(role)),
+    ),
+  ];
 
   if (parsedTargetRoles.length === 0) {
     throw new Error(
@@ -511,7 +513,9 @@ function deriveRoundDisagreements(
   }
 
   const supportRoles = assessments
-    .filter((assessment) => biomedRoles.includes(assessment.role as ActiveBiomedRole))
+    .filter((assessment) =>
+      biomedRoles.includes(assessment.role as ActiveBiomedRole),
+    )
     .filter((assessment) => assessment.recommendedLabel === 1)
     .map((assessment) => assessment.role as ActiveBiomedRole);
 
@@ -889,7 +893,11 @@ export class BiomedWorkflowRunner {
       for (const role of rolePlan.allRoles) {
         if (role === 'drug') {
           currentAssessments.push(
-            await drugAgent.assess(sample, state.hypotheses, roundContextFor(role)),
+            await drugAgent.assess(
+              sample,
+              state.hypotheses,
+              roundContextFor(role),
+            ),
           );
           continue;
         }
@@ -934,7 +942,11 @@ export class BiomedWorkflowRunner {
           continue;
         }
         currentAssessments.push(
-          await graphAgent.assess(sample, state.hypotheses, roundContextFor(role)),
+          await graphAgent.assess(
+            sample,
+            state.hypotheses,
+            roundContextFor(role),
+          ),
         );
       }
 

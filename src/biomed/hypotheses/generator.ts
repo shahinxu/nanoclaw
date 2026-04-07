@@ -1,4 +1,8 @@
-import { BiomedTaskSample, HypothesisRecord, ResearchToolAdapter } from '../types.js';
+import {
+  BiomedTaskSample,
+  HypothesisRecord,
+  ResearchToolAdapter,
+} from '../types.js';
 
 type HypothesisTargetRole =
   | 'drug'
@@ -20,13 +24,17 @@ function parseRoleList(value: unknown): HypothesisTargetRole[] {
     'cellline',
     'graph',
   ]);
-  return [...new Set(
-    value
-      .map((item) => String(item || '').trim().toLowerCase())
-      .filter((item): item is HypothesisTargetRole =>
-        allowed.has(item),
-      ),
-  )];
+  return [
+    ...new Set(
+      value
+        .map((item) =>
+          String(item || '')
+            .trim()
+            .toLowerCase(),
+        )
+        .filter((item): item is HypothesisTargetRole => allowed.has(item)),
+    ),
+  ];
 }
 
 function parseStringList(value: unknown): string[] {
@@ -91,7 +99,9 @@ export async function generateInitialHypotheses(
     }
     const payload = item as Record<string, unknown>;
     const statement = String(payload.statement ?? '').trim();
-    const topicKey = String(payload.topic_key ?? `criterion.generated-${index + 1}`).trim();
+    const topicKey = String(
+      payload.topic_key ?? `criterion.generated-${index + 1}`,
+    ).trim();
     const targetedRoles = parseRoleList(payload.targeted_roles);
     const requiredChecks = parseStringList(payload.required_checks);
 

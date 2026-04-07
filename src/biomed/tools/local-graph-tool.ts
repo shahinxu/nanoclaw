@@ -146,13 +146,19 @@ function queryHyperedgeFromSample(
 
   return {
     error: `Unsupported relationship type for local_graph_tool: ${relationship}.`,
-    details: 'Add explicit entity mapping for this relationship before running graph retrieval.',
+    details:
+      'Add explicit entity mapping for this relationship before running graph retrieval.',
   };
 }
 
-function overlapEntities(queryEntities: string[], candidateEntities: string[]): string[] {
+function overlapEntities(
+  queryEntities: string[],
+  candidateEntities: string[],
+): string[] {
   const querySet = new Set(queryEntities);
-  return uniqueStrings(candidateEntities.filter((entity) => querySet.has(entity)));
+  return uniqueStrings(
+    candidateEntities.filter((entity) => querySet.has(entity)),
+  );
 }
 
 export class LocalGraphTool {
@@ -189,7 +195,8 @@ export class LocalGraphTool {
 
     const queryKey = buildHyperedgeKey(query.relationship, query.entities);
     const maxCandidates =
-      typeof args.maxCandidates === 'number' && Number.isFinite(args.maxCandidates)
+      typeof args.maxCandidates === 'number' &&
+      Number.isFinite(args.maxCandidates)
         ? Math.max(3, Math.min(20, Math.trunc(args.maxCandidates)))
         : 8;
 
@@ -205,7 +212,9 @@ export class LocalGraphTool {
       .readdirSync(this.graphDataDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && /^order_.*\.csv$/u.test(entry.name))
       .map((entry) => entry.name)
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+      .sort((left, right) =>
+        left.localeCompare(right, undefined, { numeric: true }),
+      );
 
     for (const entry of entries) {
       const filePath = path.join(this.graphDataDir, entry);
@@ -239,8 +248,10 @@ export class LocalGraphTool {
           continue;
         }
 
-        const labelColumn = 'hyperedge_label' in row ? 'hyperedge_label' : 'label';
-        const label: BiomedLabel = Number.parseInt(row[labelColumn] ?? '0', 10) === 1 ? 1 : 0;
+        const labelColumn =
+          'hyperedge_label' in row ? 'hyperedge_label' : 'label';
+        const label: BiomedLabel =
+          Number.parseInt(row[labelColumn] ?? '0', 10) === 1 ? 1 : 0;
         const sameRelationship = relationship === query.relationship;
         const score =
           sharedEntities.length * 4 +

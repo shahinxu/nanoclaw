@@ -76,7 +76,9 @@ async function main(): Promise<void> {
     relationshipType: options.relationshipType,
   });
   const samples = await loader.loadSamples();
-  const sample = samples.find((item) => item.sampleIndex === options.sampleIndex);
+  const sample = samples.find(
+    (item) => item.sampleIndex === options.sampleIndex,
+  );
 
   if (!sample) {
     throw new Error(
