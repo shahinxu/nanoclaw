@@ -2,7 +2,7 @@ import { BiomedTaskSample } from './types.js';
 
 export function getPrimaryEntity(
   sample: BiomedTaskSample,
-  key: 'drug' | 'protein' | 'disease',
+  key: 'drug' | 'protein' | 'disease' | 'sideeffect' | 'cellline',
 ): string | undefined {
   const value = sample.entityDict[key];
   if (typeof value === 'string') {

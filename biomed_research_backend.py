@@ -4,9 +4,11 @@ import csv
 import html
 import json
 import re
+import time
 from pathlib import Path
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -231,7 +233,28 @@ def _http_get(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = 10,
 ) -> requests.Response:
-    return requests.get(url, params=params, timeout=timeout)
+    start = time.monotonic()
+    timeout_value: Any = timeout
+    if timeout > 1:
+        connect_timeout = min(3.0, max(0.5, float(timeout) * 0.3))
+        read_timeout = max(0.5, float(timeout) - connect_timeout)
+        timeout_value = (connect_timeout, read_timeout)
+    try:
+        return requests.get(url, params=params, timeout=timeout_value)
+    except requests.exceptions.RequestException as exc:
+        elapsed = time.monotonic() - start
+        host = urlparse(url).netloc or url
+        if isinstance(exc, requests.exceptions.ConnectTimeout):
+            kind = 'connect_timeout'
+        elif isinstance(exc, requests.exceptions.ReadTimeout):
+            kind = 'read_timeout'
+        elif isinstance(exc, requests.exceptions.ConnectionError):
+            kind = 'connection_error'
+        else:
+            kind = exc.__class__.__name__.lower()
+        raise RuntimeError(
+            f'[HTTP GET] {kind} host={host} elapsed={elapsed:.2f}s timeout={timeout}s error={exc}'
+        ) from exc
 
 
 def _http_post(
@@ -241,7 +264,33 @@ def _http_post(
     headers: Optional[Dict[str, str]] = None,
     timeout: int = 10,
 ) -> requests.Response:
-    return requests.post(url, json=json_payload, headers=headers, timeout=timeout)
+    start = time.monotonic()
+    timeout_value: Any = timeout
+    if timeout > 1:
+        connect_timeout = min(3.0, max(0.5, float(timeout) * 0.3))
+        read_timeout = max(0.5, float(timeout) - connect_timeout)
+        timeout_value = (connect_timeout, read_timeout)
+    try:
+        return requests.post(
+            url,
+            json=json_payload,
+            headers=headers,
+            timeout=timeout_value,
+        )
+    except requests.exceptions.RequestException as exc:
+        elapsed = time.monotonic() - start
+        host = urlparse(url).netloc or url
+        if isinstance(exc, requests.exceptions.ConnectTimeout):
+            kind = 'connect_timeout'
+        elif isinstance(exc, requests.exceptions.ReadTimeout):
+            kind = 'read_timeout'
+        elif isinstance(exc, requests.exceptions.ConnectionError):
+            kind = 'connection_error'
+        else:
+            kind = exc.__class__.__name__.lower()
+        raise RuntimeError(
+            f'[HTTP POST] {kind} host={host} elapsed={elapsed:.2f}s timeout={timeout}s error={exc}'
+        ) from exc
 
 
 def _read_text_file(path_value: Any) -> str:
@@ -384,21 +433,22 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
     graph_summary = str(arguments.get('graph_summary') or '').strip()
     graph_structured = arguments.get('graph_structured')
+    relationship_type = str(arguments.get('relationship_type') or '').strip()
+
+    if relationship_type == 'drug_drug_sideeffect':
+        hyperedge_label = 'drug-drug-sideeffect hyperedge'
+    elif relationship_type == 'drug_drug_cell-line':
+        hyperedge_label = 'drug-drug-cell-line hyperedge'
+    elif relationship_type:
+        hyperedge_label = f'{relationship_type} hyperedge'
+    else:
+        hyperedge_label = 'drug-protein-disease hyperedge'
 
     if not api_key:
-        return {
-            'text_summary': '[graph_reasoner] OpenRouter API key is missing, so graph-side model judgment could not be produced.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': 'Graph-side model judgment was unavailable because the OpenRouter API key could not be read.',
-                'model': model,
-            },
-        }
+        raise ValueError('OpenRouter API key is missing for graph_reasoner.')
 
     prompt_payload = {
-        'task': 'Act as the graph-side expert in the current debate and decide whether the graph evidence supports or contradicts the queried drug-protein-disease triplet.',
+        'task': f'Act as the graph-side expert in the current debate and decide whether the graph evidence supports or contradicts the queried {hyperedge_label}.',
         'decision_space': {
             'recommended_label': '0 or 1 only',
             'stance': ['supports', 'contradicts'],
@@ -406,10 +456,10 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         },
         'instructions': [
             'Speak as an independent graph-side expert in first person.',
-            'Start from your own judgment of the full triplet before you lean on the shared board.',
-            'Use the graph evidence, the shared evidence board, and your biological intuition about what the neighborhood implies for the queried triplet.',
+            f'Start from your own judgment of the full queried {hyperedge_label} before you lean on the shared board.',
+            f'Use the graph evidence, the shared evidence board, and your biological intuition about what the neighborhood implies for the queried {hyperedge_label}.',
             'You are allowed to use broad, indirect, or suggestive graph structure if it forms a biologically coherent story for the query.',
-            'Absence of explicit local closure or exact triplet recovery is informative but not an automatic reason to vote 0.',
+            'Absence of exact same-hyperedge recovery is informative but not an automatic reason to vote 0.',
             'Use the shared evidence board and round objective as real debate context rather than as a checklist.',
             'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
             'If a shared dispute question is present, address it directly.',
@@ -435,7 +485,7 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical graph debate agent. Speak like an expert in an active multi-expert discussion. Use graph structure flexibly and intelligently rather than as a rigid rule system. Your claim must be in first person, and when relevant you should refer to other experts as the drug-side, protein-side, disease-side, or graph-side expert. Output valid JSON only.',
+                    'content': 'You are a biomedical graph debate agent. Speak like an expert in an active multi-expert discussion. Use graph structure flexibly and intelligently rather than as a rigid rule system. Your claim must be in first person, and when relevant you should refer to other experts as the drug-side, protein-side, disease-side, sideeffect-side, cellline-side, or graph-side expert. Output valid JSON only.',
                 },
                 {
                     'role': 'user',
@@ -451,17 +501,9 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     if not response.ok:
-        return {
-            'text_summary': f'[graph_reasoner] OpenRouter call failed with status {response.status_code}.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': 'Graph-side model judgment failed, so no positive graph conclusion could be trusted.',
-                'model': model,
-                'status_code': response.status_code,
-            },
-        }
+        raise ValueError(
+            f'graph_reasoner OpenRouter call failed with status {response.status_code}.'
+        )
 
     try:
         payload = response.json()
@@ -478,23 +520,13 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     parsed = _parse_json_object(content)
     if not parsed:
-        return {
-            'text_summary': '[graph_reasoner] The model returned an unreadable response, so graph-side judgment fell back to a negative default.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': 'Graph-side model judgment was unreadable and could not justify a positive vote.',
-                'model': model,
-                'raw_content': content,
-            },
-        }
+        raise ValueError('graph_reasoner returned unreadable JSON content.')
 
     label_value = parsed.get('recommended_label')
     try:
         label = 1 if int(label_value) == 1 else 0
-    except Exception:
-        label = 0
+    except Exception as exc:
+        raise ValueError('graph_reasoner returned invalid recommended_label.') from exc
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
         stance = 'supports' if label == 1 else 'contradicts'
@@ -526,22 +558,22 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     entity_context = arguments.get('entity_context')
 
     if not api_key:
-        return {
-            'text_summary': f'[biomedical_expert_reasoner] OpenRouter API key is missing, so {role}-side model judgment could not be produced.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': f'{role.capitalize()}-side model judgment was unavailable because the OpenRouter API key could not be read.',
-                'retrieved_evidence_basis': [],
-                'knowledge_based_inference': '',
-                'model': model,
-                'role': role,
-            },
-        }
+        raise ValueError('OpenRouter API key is missing for biomedical_expert_reasoner.')
+
+    relationship_type = ''
+    if isinstance(entity_context, dict):
+        relationship_type = str(entity_context.get('relationshipType') or '').strip()
+
+    # Build dynamic task description based on relationship type / role.
+    if relationship_type == 'drug_drug_sideeffect' or role == 'sideeffect':
+        hyperedge_label = 'drug-set-sideeffect hyperedge (does the queried drug set, considered jointly, support the queried adverse effect / side effect?)'
+    elif relationship_type == 'drug_drug_cell-line' or role == 'cellline':
+        hyperedge_label = 'drug-set-cell-line hyperedge (does the queried drug set, considered jointly, support a relevant response in the queried cell line?)'
+    else:
+        hyperedge_label = 'drug-protein-disease triplet (does the queried drug act on the queried protein in the context of the queried disease?)'
 
     prompt_payload = {
-        'task': f'Act as the {role}-side expert in the current debate and decide whether you should vote 1 or 0 on the queried drug-protein-disease triplet.',
+        'task': f'Act as the {role}-side expert in the current debate and decide whether you should vote 1 or 0 on the queried {hyperedge_label}.',
         'decision_space': {
             'recommended_label': '0 or 1 only',
             'stance': ['supports', 'contradicts'],
@@ -549,11 +581,11 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         },
         'instructions': [
             'Speak as an independent expert in first person.',
-            'Start by judging the whole queried triplet, not just one local fragment of evidence.',
+            f'Start by judging the whole queried {hyperedge_label.split("(")[0].strip()}, not just one local fragment of evidence.',
             'Start from the local node context when it is available. Treat it as the primary grounding source for entity identity, aliases, and baseline biology before weighing external API evidence.',
             'Use your biomedical knowledge and reasoning as fully as possible, together with the retrieved evidence.',
             'There is no requirement that supporting evidence be direct, explicit, non-generic, or fully complete before you can vote 1.',
-            'Broad physiology, pharmacology, disease mechanism, target-class knowledge, alias resolution, and mechanistic analogy are all valid forms of support if they make biological sense for the queried triplet.',
+            f'Broad physiology, pharmacology, adverse-effect mechanism, target-class knowledge, alias resolution, and mechanistic analogy are all valid forms of support if they make biological sense for the queried {hyperedge_label.split("(")[0].strip()}.',
             'Absence of an exact string match or an explicitly named direct interaction is not by itself a reason to vote 0.',
             'Weigh retrieved evidence, shared debate context, and your own biological judgment together, then decide which side is more convincing overall.',
             'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
@@ -585,7 +617,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist in an active multi-expert discussion, not like a rigid rule checker. Speak in first person. When relevant, refer to peers as the drug-side, protein-side, disease-side, or graph-side expert and explicitly agree or disagree with them. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
+                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist in an active multi-expert discussion, not like a rigid rule checker. Speak in first person. When relevant, refer to peers as the drug-side, protein-side, disease-side, sideeffect-side, cellline-side, or graph-side expert and explicitly agree or disagree with them. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
                 },
                 {
                     'role': 'user',
@@ -601,20 +633,9 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     if not response.ok:
-        return {
-            'text_summary': f'[biomedical_expert_reasoner] OpenRouter call failed with status {response.status_code}.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': f'{role.capitalize()}-side model judgment failed, so no positive expert conclusion could be trusted.',
-                'retrieved_evidence_basis': [],
-                'knowledge_based_inference': '',
-                'model': model,
-                'role': role,
-                'status_code': response.status_code,
-            },
-        }
+        raise ValueError(
+            f'biomedical_expert_reasoner OpenRouter call failed with status {response.status_code}.'
+        )
 
     try:
         payload = response.json()
@@ -631,26 +652,13 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     parsed = _parse_json_object(content)
     if not parsed:
-        return {
-            'text_summary': '[biomedical_expert_reasoner] The model returned an unreadable response, so expert-side judgment fell back to a negative default.',
-            'structured': {
-                'recommended_label': 0,
-                'stance': 'contradicts',
-                'strength': 'weak',
-                'claim': f'{role.capitalize()}-side model judgment was unreadable and could not justify a positive vote.',
-                'retrieved_evidence_basis': [],
-                'knowledge_based_inference': '',
-                'model': model,
-                'role': role,
-                'raw_content': content,
-            },
-        }
+        raise ValueError('biomedical_expert_reasoner returned unreadable JSON content.')
 
     label_value = parsed.get('recommended_label')
     try:
         label = 1 if int(label_value) == 1 else 0
-    except Exception:
-        label = 0
+    except Exception as exc:
+        raise ValueError('biomedical_expert_reasoner returned invalid recommended_label.') from exc
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
         stance = 'supports' if label == 1 else 'contradicts'
@@ -681,6 +689,204 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _hypothesis_generator(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
+    if not api_key:
+        raise ValueError('OpenRouter API key is missing for hypothesis generation.')
+
+    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    sample = arguments.get('sample')
+    if not isinstance(sample, dict):
+        raise ValueError('hypothesis_generator requires a valid sample object.')
+
+    relationship_type = str(sample.get('relationshipType') or '').strip() or 'unknown'
+    entity_dict = sample.get('entityDict')
+    if not isinstance(entity_dict, dict):
+        raise ValueError('hypothesis_generator requires sample.entityDict as an object.')
+
+    prompt_payload = {
+        'task': 'Generate the initial hypothesis set for a biomedical hyperedge debate. Use relationship-agnostic structure and avoid task-specific assumptions (for example, do not force protein-centric checks).',
+        'instructions': [
+            'Return strict JSON only.',
+            'Model the entire queried hyperedge first, then propose criteria hypotheses for different expert roles.',
+            'Do not assume a fixed triplet schema; use only provided relationshipType and entities.',
+            'Keep each statement concise and testable.',
+            'targeted_roles entries must be chosen from: drug, protein, disease, sideeffect, cellline, graph.',
+            'Provide at least 3 criteria items.',
+        ],
+        'sample': {
+            'relationshipType': relationship_type,
+            'entityDict': entity_dict,
+        },
+        'response_schema': {
+            'positive_root_statement': 'string',
+            'negative_root_statement': 'string',
+            'criteria': [
+                {
+                    'statement': 'string',
+                    'topic_key': 'string such as criterion.drug-mechanism',
+                    'targeted_roles': ['array of role strings'],
+                    'required_checks': ['array of short checks'],
+                }
+            ],
+        },
+    }
+
+    response = _http_post(
+        f'{base_url}/chat/completions',
+        json_payload={
+            'model': model,
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'You are a biomedical hypothesis planner. Output valid JSON only and follow the requested schema exactly.',
+                },
+                {
+                    'role': 'user',
+                    'content': json.dumps(prompt_payload, ensure_ascii=False),
+                },
+            ],
+        },
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        timeout=45,
+    )
+
+    if not response.ok:
+        raise ValueError(
+            f'hypothesis_generator OpenRouter call failed with status {response.status_code}.'
+        )
+
+    payload = response.json()
+    content = ''
+    if isinstance(payload, dict):
+        choices = payload.get('choices') or []
+        if isinstance(choices, list) and choices:
+            message = choices[0].get('message') if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = str(message.get('content') or '')
+
+    parsed = _parse_json_object(content)
+    if not parsed:
+        raise ValueError('hypothesis_generator returned unreadable JSON content.')
+
+    return {
+        'text_summary': '[hypothesis_generator] LLM produced initial hypothesis plan.',
+        'structured': {
+            'positive_root_statement': parsed.get('positive_root_statement'),
+            'negative_root_statement': parsed.get('negative_root_statement'),
+            'criteria': parsed.get('criteria'),
+            'model': model,
+            'relationship_type': relationship_type,
+        },
+    }
+
+
+def _round_objective_planner(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
+    if not api_key:
+        raise ValueError('OpenRouter API key is missing for round objective planning.')
+
+    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    round_number = int(arguments.get('round_number') or 1)
+    relationship_type = str(arguments.get('relationship_type') or '').strip() or 'unknown'
+    all_roles = arguments.get('all_roles')
+    shared_evidence_board = arguments.get('shared_evidence_board')
+    previous_round = arguments.get('previous_round')
+
+    if not isinstance(all_roles, list) or not all_roles:
+        raise ValueError('round_objective_planner requires non-empty all_roles list.')
+    if not isinstance(shared_evidence_board, dict):
+        raise ValueError('round_objective_planner requires shared_evidence_board object.')
+
+    prompt_payload = {
+        'task': 'Generate the next-round debate objective for a multi-agent biomedical hyperedge discussion.',
+        'instructions': [
+            'Use previous-round vote conflicts, disagreements, and evidence board as primary signal.',
+            'Focus on one decisive unresolved question instead of broad restatement.',
+            'Keep outputs concise and action-oriented for immediate next-round use.',
+            'Return strict JSON only.',
+            'target_roles must be selected from the provided all_roles.',
+        ],
+        'input': {
+            'round_number': round_number,
+            'relationship_type': relationship_type,
+            'all_roles': all_roles,
+            'shared_evidence_board': shared_evidence_board,
+            'previous_round': previous_round,
+        },
+        'response_schema': {
+            'title': 'string',
+            'directive': 'string',
+            'response_requirement': 'string',
+            'shared_debate_question': 'string or empty',
+            'target_roles': ['array of role strings'],
+        },
+    }
+
+    response = _http_post(
+        f'{base_url}/chat/completions',
+        json_payload={
+            'model': model,
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'You are a debate-round planner for biomedical multi-agent reasoning. Output valid JSON only and follow the schema exactly.',
+                },
+                {
+                    'role': 'user',
+                    'content': json.dumps(prompt_payload, ensure_ascii=False),
+                },
+            ],
+        },
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        timeout=45,
+    )
+
+    if not response.ok:
+        raise ValueError(
+            f'round_objective_planner OpenRouter call failed with status {response.status_code}.'
+        )
+
+    payload = response.json()
+    content = ''
+    if isinstance(payload, dict):
+        choices = payload.get('choices') or []
+        if isinstance(choices, list) and choices:
+            message = choices[0].get('message') if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = str(message.get('content') or '')
+
+    parsed = _parse_json_object(content)
+    if not parsed:
+        raise ValueError('round_objective_planner returned unreadable JSON content.')
+
+    return {
+        'text_summary': '[round_objective_planner] LLM produced round objective.',
+        'structured': {
+            'title': parsed.get('title'),
+            'directive': parsed.get('directive'),
+            'response_requirement': parsed.get('response_requirement'),
+            'shared_debate_question': parsed.get('shared_debate_question'),
+            'target_roles': parsed.get('target_roles'),
+            'model': model,
+            'round_number': round_number,
+            'relationship_type': relationship_type,
+        },
+    }
+
+
 def _drug_researcher(
     drugbank_id: Optional[str],
     review_context: Optional[Dict[str, Any]] = None,
@@ -706,7 +912,7 @@ def _drug_researcher(
     chembl_molecule = _fetch_chembl_molecule_from_drugbank(did)
     if not isinstance(chembl_molecule, dict):
         return {
-            'text_summary': f'[drug_researcher] ChEMBL API lookup failed for {did}; no drug profile was produced.',
+            'text_summary': f'[drug_researcher] {did} was not found in ChEMBL; no drug profile was produced.',
             'structured': {
                 'drugbank_id': did,
                 'review_context': review,
@@ -1347,11 +1553,15 @@ def _fetch_uniprot_entry_by_gene(gene_symbol: str) -> Optional[Dict[str, Any]]:
     }
     response = _http_get('https://rest.uniprot.org/uniprotkb/search', params=params, timeout=10)
     if not response.ok:
-        return None
+        raise RuntimeError(
+            f'UniProt search API returned HTTP {response.status_code} for gene {gene_symbol!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return None
+        raise RuntimeError(
+            f'UniProt search API returned unreadable JSON for gene {gene_symbol!r}.'
+        )
     results = payload.get('results') or []
     if not results:
         return None
@@ -1372,11 +1582,15 @@ def _fetch_reactome_pathways(uniprot_accession: str) -> List[Dict[str, Any]]:
         timeout=10,
     )
     if not response.ok:
-        return []
+        raise RuntimeError(
+            f'Reactome pathways API returned HTTP {response.status_code} for {uniprot_accession!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return []
+        raise RuntimeError(
+            f'Reactome pathways API returned unreadable JSON for {uniprot_accession!r}.'
+        )
     if not isinstance(payload, list):
         return []
     pathways: List[Dict[str, Any]] = []
@@ -1432,11 +1646,15 @@ def _fetch_open_targets_disease_profile(mondo_id: str) -> Optional[Dict[str, Any
         timeout=15,
     )
     if not response.ok:
-        return None
+        raise RuntimeError(
+            f'Open Targets GraphQL API returned HTTP {response.status_code} for disease {mondo_id!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return None
+        raise RuntimeError(
+            f'Open Targets GraphQL API returned unreadable JSON for disease {mondo_id!r}.'
+        )
     data = payload.get('data') if isinstance(payload, dict) else None
     disease = data.get('disease') if isinstance(data, dict) else None
     return disease if isinstance(disease, dict) else None
@@ -1575,11 +1793,15 @@ def _fetch_chembl_id_from_drugbank(drugbank_id: str) -> Optional[str]:
         timeout=10,
     )
     if not response.ok:
-        return None
+        raise RuntimeError(
+            f'UniChem API returned HTTP {response.status_code} for DrugBank ID {drugbank_id!r}.'
+        )
     try:
         response_payload = response.json()
     except Exception:
-        return None
+        raise RuntimeError(
+            f'UniChem API returned unreadable JSON for DrugBank ID {drugbank_id!r}.'
+        )
     compounds = response_payload.get('compounds') or []
     for compound in compounds:
         if not isinstance(compound, dict):
@@ -1603,11 +1825,15 @@ def _fetch_chembl_molecule_by_id(chembl_id: str) -> Optional[Dict[str, Any]]:
         timeout=10,
     )
     if not response.ok:
-        return None
+        raise RuntimeError(
+            f'ChEMBL molecule API returned HTTP {response.status_code} for {chembl_id!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return None
+        raise RuntimeError(
+            f'ChEMBL molecule API returned unreadable JSON for {chembl_id!r}.'
+        )
     if isinstance(payload, dict) and payload.get('molecule_chembl_id'):
         return payload
     return None
@@ -1620,11 +1846,15 @@ def _fetch_chembl_mechanisms(chembl_id: str) -> List[Dict[str, Any]]:
         timeout=10,
     )
     if not response.ok:
-        return []
+        raise RuntimeError(
+            f'ChEMBL mechanism API returned HTTP {response.status_code} for {chembl_id!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return []
+        raise RuntimeError(
+            f'ChEMBL mechanism API returned unreadable JSON for {chembl_id!r}.'
+        )
     mechanisms = payload.get('mechanisms') or []
     return [item for item in mechanisms if isinstance(item, dict)]
 
@@ -1636,11 +1866,15 @@ def _fetch_chembl_indications(chembl_id: str) -> List[Dict[str, Any]]:
         timeout=10,
     )
     if not response.ok:
-        return []
+        raise RuntimeError(
+            f'ChEMBL indication API returned HTTP {response.status_code} for {chembl_id!r}.'
+        )
     try:
         payload = response.json()
     except Exception:
-        return []
+        raise RuntimeError(
+            f'ChEMBL indication API returned unreadable JSON for {chembl_id!r}.'
+        )
     indications = payload.get('drug_indications') or []
     return [item for item in indications if isinstance(item, dict)]
 
@@ -1659,6 +1893,129 @@ def _extract_chembl_safety_flags(chembl_molecule: Optional[Dict[str, Any]]) -> L
     return flags
 
 
+def _fetch_openfda_ae_drugs(term: str) -> List[Dict[str, Any]]:
+    """Query openFDA drug adverse events API for top drugs reporting a given MedDRA PT term."""
+    try:
+        response = _http_get(
+            'https://api.fda.gov/drug/event.json',
+            params={
+                'search': f'patient.reaction.reactionmeddrapt.exact:"{term}"',
+                'count': 'patient.drug.openfda.generic_name.exact',
+                'limit': 10,
+            },
+            timeout=10,
+        )
+        if not response.ok:
+            return []
+        payload = response.json()
+        results = payload.get('results') or []
+        return [
+            {'term': str(item.get('term') or ''), 'count': int(item.get('count') or 0)}
+            for item in results
+            if isinstance(item, dict) and item.get('term')
+        ]
+    except Exception:
+        return []
+
+
+def _sideeffect_researcher(
+    cui: Optional[str],
+    drug_ids: Optional[List[str]] = None,
+    review_context: Optional[Dict[str, Any]] = None,
+    workspace_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    cid = (cui or '').strip()
+    queried_drug_ids = [d.strip() for d in (drug_ids or []) if str(d or '').strip()]
+    review = _normalize_review_context(review_context)
+
+    if not cid:
+        return {
+            'text_summary': '[sideeffect_researcher] No CUI provided; unable to look up a side-effect profile.',
+            'structured': {
+                'cui': None,
+                'review_context': review,
+                'name': None,
+                'description': None,
+                'top_reporting_drugs': [],
+                'sources': [],
+            },
+        }
+
+    local_row = _node_context_row(workspace_root, 'sideeffect', cid)
+    name = _clean_node_text(str(local_row.get('node_name') or '')) if local_row else None
+    description = _clean_node_text(str(local_row.get('description') or '')) if local_row else None
+
+    # Try openFDA adverse events count by MedDRA PT term.
+    # Try full node_name first; if it has a semicolon, also try the first segment.
+    top_reporting_drugs: List[Dict[str, Any]] = []
+    openfda_term_used: Optional[str] = None
+    if name:
+        search_terms = [name]
+        if ';' in name:
+            search_terms.append(name.split(';')[0].strip())
+        for term in search_terms:
+            result = _fetch_openfda_ae_drugs(term)
+            if result:
+                top_reporting_drugs = result
+                openfda_term_used = term
+                break
+
+    summary_parts: List[str] = [f'Side-effect profile for {cid}.']
+    if name:
+        summary_parts.append(f'Name: {name}.')
+    if description:
+        summary_parts.append(f'Description: {description}')
+    if top_reporting_drugs:
+        drug_terms = ', '.join([str(item.get('term') or '') for item in top_reporting_drugs[:8]])
+        summary_parts.append(
+            f'Top drugs in openFDA adverse event reports associated with this side effect'
+            f' (searched as "{openfda_term_used}"): {drug_terms}.'
+        )
+    else:
+        summary_parts.append(
+            'No openFDA adverse event drug list was retrieved for this side effect term.'
+        )
+    if not name and not description and not top_reporting_drugs:
+        summary_parts.append('No local or external side-effect profile was produced.')
+
+    targeted_review = _build_targeted_review_summary(
+        review,
+        [
+            f'Queried drugs: {", ".join(queried_drug_ids)}.' if queried_drug_ids else '',
+            f'Top reporting drugs from openFDA: {", ".join([str(d.get("term") or "") for d in top_reporting_drugs[:5]])}.'
+            if top_reporting_drugs else '',
+        ],
+    )
+    if targeted_review:
+        summary_parts.append(targeted_review)
+
+    return {
+        'text_summary': ' '.join(summary_parts),
+        'structured': {
+            'cui': cid,
+            'review_context': review,
+            'name': name,
+            'description': description,
+            'top_reporting_drugs': top_reporting_drugs,
+            'openfda_term_used': openfda_term_used,
+            'queried_drug_ids': queried_drug_ids,
+            'sources': [
+                {
+                    'type': 'local_node',
+                    'csv': 'data_node/node_side-effect_description.csv',
+                    'key': 'CUI',
+                    'found': local_row is not None,
+                },
+                {
+                    'type': 'openfda_ae_api',
+                    'base_url': 'https://api.fda.gov/drug/event.json',
+                    'term_used': openfda_term_used,
+                },
+            ],
+        },
+    }
+
+
 def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     review_context = arguments.get('review_context')
     if name == 'drug_researcher':
@@ -1671,10 +2028,21 @@ def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return _protein_researcher(arguments.get('gene_symbol'), review_context)
     if name == 'disease_researcher':
         return _disease_researcher(arguments.get('mondo_id'), review_context)
+    if name == 'sideeffect_researcher':
+        return _sideeffect_researcher(
+            arguments.get('cui'),
+            arguments.get('drug_ids'),
+            review_context,
+            arguments.get('workspace_root'),
+        )
     if name == 'node_context':
         return _node_context(arguments)
     if name == 'biomedical_expert_reasoner':
         return _biomedical_expert_reasoner(arguments)
+    if name == 'hypothesis_generator':
+        return _hypothesis_generator(arguments)
+    if name == 'round_objective_planner':
+        return _round_objective_planner(arguments)
     if name == 'graph_reasoner':
         return _graph_reasoner(arguments)
     raise ValueError(f'Unsupported research tool: {name}')

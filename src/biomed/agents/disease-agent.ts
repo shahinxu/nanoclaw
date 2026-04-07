@@ -243,6 +243,27 @@ function mergeResearchOutputs(
   };
 }
 
+function isOpenTargetsFailure(errorMessage: string | undefined): boolean {
+  const normalized = (errorMessage ?? '').toLowerCase();
+  const isOpenTargetsRelated =
+    normalized.includes('open targets') || normalized.includes('opentargets');
+  if (!isOpenTargetsRelated) {
+    return false;
+  }
+  return (
+    normalized.includes('http 400') ||
+    normalized.includes('http 429') ||
+    normalized.includes('http 500') ||
+    normalized.includes('http 502') ||
+    normalized.includes('http 503') ||
+    normalized.includes('http 504') ||
+    normalized.includes('read_timeout') ||
+    normalized.includes('connect_timeout') ||
+    normalized.includes('connection_error') ||
+    normalized.includes('timeout')
+  );
+}
+
 export class DiseaseAgent {
   readonly agentId = 'disease_agent';
 
@@ -331,10 +352,29 @@ export class DiseaseAgent {
       };
       plannerActions.push(plannerAction);
 
-      const result = await this.toolAdapter.callTool(
+      let result = await this.toolAdapter.callTool(
         'disease_researcher',
         researcherArguments,
       );
+      if (result.status !== 'ok') {
+        if (isOpenTargetsFailure(result.error)) {
+          result = {
+            toolName: 'disease_researcher',
+            status: 'ok',
+            textSummary:
+              '[disease_researcher] Open Targets lookup failed in this round; continuing with shared node context and downstream reasoning.',
+            structured: {
+              mondo_id: diseaseId,
+              open_targets_error: result.error,
+              skipped_due_to_open_targets_failure_in_round: true,
+            },
+          };
+        } else {
+          throw new Error(
+            `disease_researcher failed for sample ${sample.sampleIndex}, disease ${diseaseId}: ${result.error ?? 'unknown error'}`,
+          );
+        }
+      }
       const localNodeResult = {
         toolName: 'shared_node_context',
         status: 'ok' as const,
@@ -360,18 +400,22 @@ export class DiseaseAgent {
             researcher: result.structured,
             node_context: localNodeEntry?.structured,
             shared_node_context: sharedNodeContext,
-            fallback_heuristic: detectDiseaseProteinSignal(
-              mergedResult.textSummary,
-              proteinId,
-              mergedResult.structured,
-              roundContext,
-            ),
           },
         },
       );
+      if (reasonerResult.status !== 'ok') {
+        throw new Error(
+          `biomedical_expert_reasoner failed for sample ${sample.sampleIndex}, disease ${diseaseId}: ${reasonerResult.error ?? 'unknown error'}`,
+        );
+      }
       const reasonedOutput = parseStructuredReasonerOutput(
         reasonerResult.structured,
       );
+      if (!reasonedOutput) {
+        throw new Error(
+          `biomedical_expert_reasoner returned invalid structured output for sample ${sample.sampleIndex}, disease ${diseaseId}`,
+        );
+      }
 
       if (isInformativeToolResult(result)) {
         evidenceItems.push({
@@ -393,33 +437,7 @@ export class DiseaseAgent {
         });
       }
 
-      const heuristicSignal = isInformativeToolResult(result)
-        ? detectDiseaseProteinSignal(
-            mergedResult.textSummary,
-            proteinId,
-            mergedResult.structured,
-            roundContext,
-          )
-        : null;
-
-      const diseaseSignal = heuristicSignal;
-      const finalOutput = reasonedOutput ?? diseaseSignal;
-
-      if (isInformativeToolResult(result) && diseaseSignal) {
-        evaluationTrace.push({
-          id: `disease-trace-${sample.sampleIndex}-${diseaseId}`,
-          toolName: 'disease_researcher',
-          toolArguments: {
-            mondo_id: diseaseId,
-            review_context: reviewContext,
-          },
-          entityScope: proteinId ? [diseaseId, proteinId] : [diseaseId],
-          rawToolOutput: result,
-          interpretedOutput: diseaseSignal,
-        });
-      }
-
-      if (reasonedOutput && finalOutput) {
+      {
         evaluationTrace.push({
           id: `disease-reasoner-trace-${sample.sampleIndex}-${diseaseId}`,
           toolName: 'biomedical_expert_reasoner',
@@ -431,21 +449,19 @@ export class DiseaseAgent {
           },
           entityScope: proteinId ? [diseaseId, proteinId] : [diseaseId],
           rawToolOutput: reasonerResult,
-          interpretedOutput: finalOutput,
+          interpretedOutput: reasonedOutput,
         });
       }
 
-      if (finalOutput) {
+      {
         evidenceItems.push({
           id: `disease-target-${sample.sampleIndex}-${diseaseId}`,
           source: this.agentId,
-          toolName: reasonedOutput
-            ? 'biomedical_expert_reasoner'
-            : 'disease_researcher_screen',
+          toolName: 'biomedical_expert_reasoner',
           entityScope: proteinId ? [diseaseId, proteinId] : [diseaseId],
-          claim: finalOutput.claim,
-          stance: finalOutput.stance,
-          strength: finalOutput.strength,
+          claim: reasonedOutput.claim,
+          stance: reasonedOutput.stance,
+          strength: reasonedOutput.strength,
           structured: {
             diseaseId,
             proteinId,

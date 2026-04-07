@@ -1,24 +1,145 @@
-import { BiomedTaskSample, HypothesisRecord } from '../types.js';
+import { BiomedTaskSample, HypothesisRecord, ResearchToolAdapter } from '../types.js';
 
-export function generateInitialHypotheses(
+type HypothesisTargetRole =
+  | 'drug'
+  | 'protein'
+  | 'disease'
+  | 'sideeffect'
+  | 'cellline'
+  | 'graph';
+
+function parseRoleList(value: unknown): HypothesisTargetRole[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const allowed = new Set([
+    'drug',
+    'protein',
+    'disease',
+    'sideeffect',
+    'cellline',
+    'graph',
+  ]);
+  return [...new Set(
+    value
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter((item): item is HypothesisTargetRole =>
+        allowed.has(item),
+      ),
+  )];
+}
+
+function parseStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => String(item || '').trim())
+    .filter((item) => item.length > 0);
+}
+
+export async function generateInitialHypotheses(
   sample: BiomedTaskSample,
-): HypothesisRecord[] {
+  toolAdapter: ResearchToolAdapter,
+): Promise<HypothesisRecord[]> {
+  const result = await toolAdapter.callTool('hypothesis_generator', {
+    sample: {
+      sampleIndex: sample.sampleIndex,
+      relationshipType: sample.relationshipType,
+      entityDict: sample.entityDict,
+    },
+  });
+
+  if (result.status !== 'ok') {
+    throw new Error(
+      `hypothesis_generator failed for sample ${sample.sampleIndex}: ${result.error ?? 'unknown error'}`,
+    );
+  }
+  if (!result.structured) {
+    throw new Error(
+      `hypothesis_generator returned empty structured payload for sample ${sample.sampleIndex}`,
+    );
+  }
+
+  const positiveRootStatement = String(
+    result.structured.positive_root_statement ?? '',
+  ).trim();
+  const negativeRootStatement = String(
+    result.structured.negative_root_statement ?? '',
+  ).trim();
+  const criteriaRaw = result.structured.criteria;
+
+  if (!positiveRootStatement || !negativeRootStatement) {
+    throw new Error(
+      `hypothesis_generator returned invalid root statements for sample ${sample.sampleIndex}`,
+    );
+  }
+  if (!Array.isArray(criteriaRaw) || criteriaRaw.length < 3) {
+    throw new Error(
+      `hypothesis_generator must return at least 3 criteria for sample ${sample.sampleIndex}`,
+    );
+  }
+
   const positiveRootId = `H-positive-${sample.sampleIndex}`;
   const negativeRootId = `H-negative-${sample.sampleIndex}`;
+
+  const criteria: HypothesisRecord[] = criteriaRaw.map((item, index) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(
+        `hypothesis_generator criterion ${index} is not an object for sample ${sample.sampleIndex}`,
+      );
+    }
+    const payload = item as Record<string, unknown>;
+    const statement = String(payload.statement ?? '').trim();
+    const topicKey = String(payload.topic_key ?? `criterion.generated-${index + 1}`).trim();
+    const targetedRoles = parseRoleList(payload.targeted_roles);
+    const requiredChecks = parseStringList(payload.required_checks);
+
+    if (!statement) {
+      throw new Error(
+        `hypothesis_generator criterion ${index} has empty statement for sample ${sample.sampleIndex}`,
+      );
+    }
+    if (targetedRoles.length === 0) {
+      throw new Error(
+        `hypothesis_generator criterion ${index} has no valid targeted_roles for sample ${sample.sampleIndex}`,
+      );
+    }
+    if (requiredChecks.length === 0) {
+      throw new Error(
+        `hypothesis_generator criterion ${index} has no required_checks for sample ${sample.sampleIndex}`,
+      );
+    }
+
+    return {
+      id: `H-criterion-${index + 1}-${sample.sampleIndex}`,
+      statement,
+      kind: 'criterion',
+      status: 'open',
+      topicKey,
+      parentId: positiveRootId,
+      childIds: [],
+      depth: 1,
+      frontier: true,
+      dependencyMode: 'any',
+      targetedRoles,
+      requiredChecks,
+      evidenceFor: [],
+      evidenceAgainst: [],
+      confidence: 0,
+      createdRound: 0,
+      lastUpdatedRound: 0,
+    };
+  });
 
   return [
     {
       id: positiveRootId,
-      statement: 'The queried drug-protein-disease relationship exists.',
+      statement: positiveRootStatement,
       kind: 'positive',
       status: 'open',
       topicKey: 'root-positive',
-      childIds: [
-        `H-criterion-drug-target-${sample.sampleIndex}`,
-        `H-criterion-protein-disease-${sample.sampleIndex}`,
-        `H-criterion-disease-target-${sample.sampleIndex}`,
-        `H-criterion-graph-specificity-${sample.sampleIndex}`,
-      ],
+      childIds: criteria.map((item) => item.id),
       depth: 0,
       frontier: false,
       dependencyMode: 'all',
@@ -31,8 +152,7 @@ export function generateInitialHypotheses(
     },
     {
       id: negativeRootId,
-      statement:
-        'The queried drug-protein-disease relationship is unsupported or false.',
+      statement: negativeRootStatement,
       kind: 'negative',
       status: 'open',
       topicKey: 'root-negative',
@@ -49,101 +169,6 @@ export function generateInitialHypotheses(
       createdRound: 0,
       lastUpdatedRound: 0,
     },
-    {
-      id: `H-criterion-drug-target-${sample.sampleIndex}`,
-      statement:
-        'The drug side provides direct mechanism or target evidence for the queried protein.',
-      kind: 'criterion',
-      status: 'open',
-      topicKey: 'criterion.drug-target',
-      parentId: positiveRootId,
-      childIds: [],
-      depth: 1,
-      frontier: true,
-      dependencyMode: 'any',
-      targetedRoles: ['drug'],
-      requiredChecks: [
-        'drug-protein evidence',
-        'mechanism or target evidence',
-        'drug-side biological support',
-      ],
-      evidenceFor: [],
-      evidenceAgainst: [],
-      confidence: 0,
-      createdRound: 0,
-      lastUpdatedRound: 0,
-    },
-    {
-      id: `H-criterion-protein-disease-${sample.sampleIndex}`,
-      statement:
-        'The protein side provides disease-specific relevance for the queried disease.',
-      kind: 'criterion',
-      status: 'open',
-      topicKey: 'criterion.protein-disease',
-      parentId: positiveRootId,
-      childIds: [],
-      depth: 1,
-      frontier: true,
-      dependencyMode: 'any',
-      targetedRoles: ['protein'],
-      requiredChecks: [
-        'protein-disease evidence',
-        'pathway, phenotype, or mechanistic support',
-        'protein-side biological relevance',
-      ],
-      evidenceFor: [],
-      evidenceAgainst: [],
-      confidence: 0,
-      createdRound: 0,
-      lastUpdatedRound: 0,
-    },
-    {
-      id: `H-criterion-disease-target-${sample.sampleIndex}`,
-      statement:
-        'The disease side explicitly implicates the queried protein as a relevant target or treatment axis.',
-      kind: 'criterion',
-      status: 'open',
-      topicKey: 'criterion.disease-target',
-      parentId: positiveRootId,
-      childIds: [],
-      depth: 1,
-      frontier: true,
-      dependencyMode: 'any',
-      targetedRoles: ['disease'],
-      requiredChecks: [
-        'disease-target evidence',
-        'disease targets, treatments, or biomarkers',
-        'disease-side biological relevance',
-      ],
-      evidenceFor: [],
-      evidenceAgainst: [],
-      confidence: 0,
-      createdRound: 0,
-      lastUpdatedRound: 0,
-    },
-    {
-      id: `H-criterion-graph-specificity-${sample.sampleIndex}`,
-      statement:
-        'The graph side supports the triplet with specific neighborhood structure rather than generic proximity alone.',
-      kind: 'criterion',
-      status: 'open',
-      topicKey: 'criterion.graph-specificity',
-      parentId: positiveRootId,
-      childIds: [],
-      depth: 1,
-      frontier: true,
-      dependencyMode: 'any',
-      targetedRoles: ['graph'],
-      requiredChecks: [
-        'graph neighborhood support',
-        'shared mechanism or disease structure',
-        'triplet-level graph coherence',
-      ],
-      evidenceFor: [],
-      evidenceAgainst: [],
-      confidence: 0,
-      createdRound: 0,
-      lastUpdatedRound: 0,
-    },
+    ...criteria,
   ];
 }

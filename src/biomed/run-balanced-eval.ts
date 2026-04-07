@@ -23,6 +23,7 @@ interface EvalMetrics {
   precision: number;
   recall: number;
   f1: number;
+  auroc: number | null;
   tp: number;
   tn: number;
   fp: number;
@@ -159,15 +160,66 @@ function balancedSample(
   return shuffleInPlace([...sampledPositives, ...sampledNegatives], seed + 2);
 }
 
+function computeAuroc(labels: number[], scores: number[]): number | null {
+  if (labels.length !== scores.length || labels.length === 0) {
+    return null;
+  }
+
+  let nPos = 0;
+  let nNeg = 0;
+  for (const label of labels) {
+    if (label === 1) {
+      nPos += 1;
+    } else if (label === 0) {
+      nNeg += 1;
+    }
+  }
+  if (nPos === 0 || nNeg === 0) {
+    return null;
+  }
+
+  const pairs = scores
+    .map((score, index) => ({ score, label: labels[index] }))
+    .sort((a, b) => a.score - b.score);
+
+  // Average-rank ties (Mann-Whitney interpretation of AUROC).
+  let rank = 1;
+  let sumRanksPos = 0;
+  let index = 0;
+  while (index < pairs.length) {
+    let end = index;
+    while (end + 1 < pairs.length && pairs[end + 1].score === pairs[index].score) {
+      end += 1;
+    }
+    const count = end - index + 1;
+    const avgRank = rank + (count - 1) / 2;
+    for (let j = index; j <= end; j += 1) {
+      if (pairs[j].label === 1) {
+        sumRanksPos += avgRank;
+      }
+    }
+    rank += count;
+    index = end + 1;
+  }
+
+  const u = sumRanksPos - (nPos * (nPos + 1)) / 2;
+  return u / (nPos * nNeg);
+}
+
 function computeMetrics(results: WorkflowResult[]): EvalMetrics {
   let tp = 0;
   let tn = 0;
   let fp = 0;
   let fn = 0;
+  const labels: number[] = [];
+  const scores: number[] = [];
 
   for (const result of results) {
     const gold = result.trace.groundTruth ?? 0;
     const predicted = result.decision.label;
+    const voteStats = summarizeExpertVotes(result);
+    labels.push(gold);
+    scores.push(voteStats.positive_vote_prob);
     if (predicted === 1 && gold === 1) {
       tp += 1;
     } else if (predicted === 0 && gold === 0) {
@@ -188,7 +240,9 @@ function computeMetrics(results: WorkflowResult[]): EvalMetrics {
       ? (2 * precision * recall) / (precision + recall)
       : 0;
 
-  return { total, accuracy, precision, recall, f1, tp, tn, fp, fn };
+  const auroc = computeAuroc(labels, scores);
+
+  return { total, accuracy, precision, recall, f1, auroc, tp, tn, fp, fn };
 }
 
 function updateRunningCounts(
@@ -246,7 +300,35 @@ function reportProgress(counts: RunningCounts, total: number): void {
   console.log(line);
 }
 
+function summarizeExpertVotes(result: WorkflowResult): {
+  positiveVoteCount: number;
+  negativeVoteCount: number;
+  expertCount: number;
+  positive_vote_prob: number;
+} {
+  const expertAssessments = (result.trace.assessments ?? []).filter(
+    (assessment) => assessment.role !== 'arbiter',
+  );
+  const positiveVoteCount = expertAssessments.filter(
+    (assessment) => assessment.recommendedLabel === 1,
+  ).length;
+  const negativeVoteCount = expertAssessments.filter(
+    (assessment) => assessment.recommendedLabel === 0,
+  ).length;
+  const expertCount = expertAssessments.length;
+  const positive_vote_prob =
+    expertCount > 0 ? positiveVoteCount / expertCount : 0.5;
+
+  return {
+    positiveVoteCount,
+    negativeVoteCount,
+    expertCount,
+    positive_vote_prob,
+  };
+}
+
 function summarizeResult(result: WorkflowResult) {
+  const voteStats = summarizeExpertVotes(result);
   return {
     sampleIndex: result.trace.sampleIndex,
     groundTruth: result.trace.groundTruth,
@@ -254,6 +336,10 @@ function summarizeResult(result: WorkflowResult) {
     decisionStatus: result.decision.status,
     decisionMode: result.decision.decisionMode,
     confidence: result.decision.confidence,
+    positive_vote_prob: voteStats.positive_vote_prob,
+    expertVoteCount: voteStats.expertCount,
+    expertPositiveVotes: voteStats.positiveVoteCount,
+    expertNegativeVotes: voteStats.negativeVoteCount,
     rationale: result.decision.rationale,
     entityDict: result.trace.entityDict,
   };

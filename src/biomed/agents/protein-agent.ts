@@ -347,6 +347,11 @@ export class ProteinAgent {
         'protein_researcher',
         researcherArguments,
       );
+      if (result.status !== 'ok') {
+        throw new Error(
+          `protein_researcher failed for sample ${sample.sampleIndex}, protein ${proteinId}: ${result.error ?? 'unknown error'}`,
+        );
+      }
       const localNodeResult = {
         toolName: 'shared_node_context',
         status: 'ok' as const,
@@ -372,18 +377,22 @@ export class ProteinAgent {
             researcher: result.structured,
             node_context: localNodeEntry?.structured,
             shared_node_context: sharedNodeContext,
-            fallback_heuristic: detectProteinDiseaseSignal(
-              mergedResult.textSummary,
-              diseaseId,
-              mergedResult.structured,
-              roundContext,
-            ),
           },
         },
       );
+      if (reasonerResult.status !== 'ok') {
+        throw new Error(
+          `biomedical_expert_reasoner failed for sample ${sample.sampleIndex}, protein ${proteinId}: ${reasonerResult.error ?? 'unknown error'}`,
+        );
+      }
       const reasonedOutput = parseStructuredReasonerOutput(
         reasonerResult.structured,
       );
+      if (!reasonedOutput) {
+        throw new Error(
+          `biomedical_expert_reasoner returned invalid structured output for sample ${sample.sampleIndex}, protein ${proteinId}`,
+        );
+      }
 
       if (isInformativeToolResult(result)) {
         evidenceItems.push({
@@ -405,33 +414,7 @@ export class ProteinAgent {
         });
       }
 
-      const heuristicSignal = isInformativeToolResult(result)
-        ? detectProteinDiseaseSignal(
-            mergedResult.textSummary,
-            diseaseId,
-            mergedResult.structured,
-            roundContext,
-          )
-        : null;
-
-      const diseaseSignal = heuristicSignal;
-      const finalOutput = reasonedOutput ?? diseaseSignal;
-
-      if (isInformativeToolResult(result) && diseaseSignal) {
-        evaluationTrace.push({
-          id: `protein-trace-${sample.sampleIndex}-${proteinId}`,
-          toolName: 'protein_researcher',
-          toolArguments: {
-            gene_symbol: proteinId,
-            review_context: reviewContext,
-          },
-          entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
-          rawToolOutput: result,
-          interpretedOutput: diseaseSignal,
-        });
-      }
-
-      if (reasonedOutput && finalOutput) {
+      {
         evaluationTrace.push({
           id: `protein-reasoner-trace-${sample.sampleIndex}-${proteinId}`,
           toolName: 'biomedical_expert_reasoner',
@@ -443,21 +426,19 @@ export class ProteinAgent {
           },
           entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
           rawToolOutput: reasonerResult,
-          interpretedOutput: finalOutput,
+          interpretedOutput: reasonedOutput,
         });
       }
 
-      if (finalOutput) {
+      {
         evidenceItems.push({
           id: `protein-disease-${sample.sampleIndex}-${proteinId}`,
           source: this.agentId,
-          toolName: reasonedOutput
-            ? 'biomedical_expert_reasoner'
-            : 'protein_researcher_screen',
+          toolName: 'biomedical_expert_reasoner',
           entityScope: diseaseId ? [proteinId, diseaseId] : [proteinId],
-          claim: finalOutput.claim,
-          stance: finalOutput.stance,
-          strength: finalOutput.strength,
+          claim: reasonedOutput.claim,
+          stance: reasonedOutput.stance,
+          strength: reasonedOutput.strength,
           structured: {
             proteinId,
             diseaseId,

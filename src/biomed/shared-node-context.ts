@@ -17,7 +17,13 @@ export function formatSharedNodeBundle(
 ): string {
   const sections: string[] = [];
 
-  for (const entityType of ['drug', 'protein', 'disease'] as const) {
+  for (const entityType of [
+    'drug',
+    'protein',
+    'disease',
+    'sideeffect',
+    'cellline',
+  ] as const) {
     const items = bundle[entityType];
     if (items.length === 0) {
       continue;

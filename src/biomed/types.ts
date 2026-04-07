@@ -2,6 +2,15 @@ export type BiomedLabel = 0 | 1;
 
 export type BiomedEntityValue = string | string[];
 
+export type ExpertRole =
+  | 'drug'
+  | 'protein'
+  | 'disease'
+  | 'sideeffect'
+  | 'cellline';
+
+export type AgentRole = ExpertRole | 'graph' | 'arbiter';
+
 export interface BiomedTaskSample {
   sampleIndex: number;
   relationshipType: string;
@@ -32,7 +41,7 @@ export interface HypothesisRecord {
   depth: number;
   frontier: boolean;
   dependencyMode?: 'all' | 'any' | 'majority';
-  targetedRoles?: Array<'drug' | 'protein' | 'disease' | 'graph'>;
+  targetedRoles?: Array<Exclude<AgentRole, 'arbiter'>>;
   requiredChecks: string[];
   evidenceFor: string[];
   evidenceAgainst: string[];
@@ -90,6 +99,8 @@ export interface SharedNodeContextBundle {
   drug: SharedNodeContextEntry[];
   protein: SharedNodeContextEntry[];
   disease: SharedNodeContextEntry[];
+  sideeffect: SharedNodeContextEntry[];
+  cellline: SharedNodeContextEntry[];
 }
 
 export interface ResearchReviewContext {
@@ -111,8 +122,11 @@ export interface ResearchReviewContext {
   hypothesisFocus?: string[];
   activeHypothesisIds?: string[];
   targetDrugId?: string;
+  targetDrugIds?: string[];
   targetProteinId?: string;
   targetDiseaseId?: string;
+  targetSideeffectId?: string;
+  targetCelllineId?: string;
   sharedNodeContext?: SharedNodeContextBundle;
   localNodeSummary?: string;
   localNodeStructured?: Record<string, unknown>;
@@ -135,7 +149,7 @@ export interface RoundObjective {
   responseRequirement: string;
   sharedDebateQuestion?: string;
   sharedHypothesisFocus?: string[];
-  targetRoles: Array<'drug' | 'protein' | 'disease' | 'graph'>;
+  targetRoles: Array<Exclude<AgentRole, 'arbiter'>>;
 }
 
 export interface ResearchToolAdapter {
@@ -166,7 +180,7 @@ export interface RoundDisagreement {
   escalationLevel: 'initial' | 'escalated' | 'persistent';
   title: string;
   question: string;
-  affectedRoles: Array<'drug' | 'protein' | 'disease'>;
+  affectedRoles: ExpertRole[];
   rationale: string;
   triggeringEvidenceIds: string[];
   status: 'open' | 'carried-forward' | 'resolved';
@@ -191,7 +205,7 @@ export interface AgentRoundContext {
 
 export interface AgentAssessment {
   agentId: string;
-  role: 'drug' | 'protein' | 'disease' | 'graph' | 'arbiter';
+  role: AgentRole;
   roundNumber: number;
   recommendedLabel: BiomedLabel;
   summary: string;

@@ -15,27 +15,14 @@ import {
 } from '../assessment-utils.js';
 import { getEntityIds, getPrimaryEntity } from '../entity-utils.js';
 import {
+  formatSharedNodeBundle,
+  getSharedNodeEntry,
+} from '../shared-node-context.js';
+import {
   getInformativeToolStructured,
   getInformativeToolSummary,
   isInformativeToolResult,
 } from '../tool-result-utils.js';
-import {
-  formatSharedNodeBundle,
-  getSharedNodeEntry,
-} from '../shared-node-context.js';
-
-function primaryHypothesisStatement(
-  hypotheses: HypothesisRecord[],
-  roundContext?: AgentRoundContext,
-): string {
-  if (roundContext?.hypothesisFocus.length) {
-    return roundContext.hypothesisFocus[0];
-  }
-  return (
-    hypotheses[0]?.statement ??
-    'The queried drug-protein-disease relationship exists.'
-  );
-}
 
 function mergeResearchOutputs(
   primaryResult: {
@@ -50,15 +37,11 @@ function mergeResearchOutputs(
     textSummary: string;
     structured: Record<string, unknown> | null;
   },
-): {
-  textSummary: string;
-  structured: Record<string, unknown>;
-} {
+): { textSummary: string; structured: Record<string, unknown> } {
   const primarySummary = getInformativeToolSummary(primaryResult);
   const nodeSummary = getInformativeToolSummary(nodeResult);
   const primaryStructured = getInformativeToolStructured(primaryResult);
   const nodeStructured = getInformativeToolStructured(nodeResult);
-
   return {
     textSummary: [nodeSummary, primarySummary]
       .filter((value) => value.trim() !== '')
@@ -71,20 +54,8 @@ function mergeResearchOutputs(
   };
 }
 
-function isUniChemFailure(errorMessage: string | undefined): boolean {
-  const normalized = (errorMessage ?? '').toLowerCase();
-  return (
-    normalized.includes('unichem') ||
-    (normalized.includes('www.ebi.ac.uk') &&
-      (normalized.includes('read_timeout') ||
-        normalized.includes('connect_timeout') ||
-        normalized.includes('connection_error') ||
-        normalized.includes('http post')))
-  );
-}
-
-export class DrugAgent {
-  readonly agentId = 'drug_agent';
+export class SideeffectAgent {
+  readonly agentId = 'sideeffect_agent';
 
   constructor(private readonly toolAdapter: ResearchToolAdapter) {}
 
@@ -94,23 +65,22 @@ export class DrugAgent {
     roundContext?: AgentRoundContext,
   ): Promise<AgentAssessment> {
     const drugIds = getEntityIds(sample, 'drug', 'drugs');
-    const proteinId = getPrimaryEntity(sample, 'protein');
-    const diseaseId = getPrimaryEntity(sample, 'disease');
+    const sideeffectId = getPrimaryEntity(sample, 'sideeffect');
     const plannerActions: PlannerAction[] = [];
     const evidenceItems: EvidenceItem[] = [];
     const evaluationTrace: AgentEvaluationTrace[] = [];
-    let skipUniChemForRound = false;
 
-    for (const drugId of drugIds) {
+    if (sideeffectId) {
       const sharedNodeContext = roundContext?.sharedNodeContext;
       const localNodeEntry = sharedNodeContext
-        ? getSharedNodeEntry(sharedNodeContext, 'drug', drugId)
+        ? getSharedNodeEntry(sharedNodeContext, 'sideeffect', sideeffectId)
         : undefined;
+
       const baseReviewContext: ResearchReviewContext = {
         roundNumber: roundContext?.roundNumber ?? 1,
         focusMode:
           roundContext && roundContext.roundNumber > 1
-            ? 'mechanism_only'
+            ? 'target_alignment'
             : 'broad',
         focalQuestion:
           roundContext?.roundObjective.sharedDebateQuestion ??
@@ -126,10 +96,9 @@ export class DrugAgent {
         roundObjective: roundContext?.roundObjective,
         hypothesisFocus: roundContext?.hypothesisFocus ?? [],
         activeHypothesisIds: roundContext?.activeHypothesisIds ?? [],
-        targetDrugId: drugId,
+        targetDrugId: drugIds[0],
         targetDrugIds: drugIds,
-        targetProteinId: proteinId,
-        targetDiseaseId: diseaseId,
+        targetSideeffectId: sideeffectId,
         sharedNodeContext,
       };
       const reviewContext: ResearchReviewContext = {
@@ -138,74 +107,47 @@ export class DrugAgent {
         localNodeStructured: localNodeEntry?.structured,
         localEvidencePriority: 'primary',
       };
-      const researcherArguments = {
-        drugbank_id: drugId,
-        review_context: reviewContext,
-      };
 
       const plannerAction: PlannerAction = {
         hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
-        hypothesisStatement: primaryHypothesisStatement(
-          hypotheses,
-          roundContext,
-        ),
-        verificationGoal: `Review the complete shared hyperedge context${roundContext?.sharedNodeContext ? ` (${formatSharedNodeBundle(roundContext.sharedNodeContext)})` : ''}. Form a 0/1 judgment for the entire hyperedge. Speak as the drug-side expert. ${roundContext?.roundObjective.sharedDebateQuestion ? `Address this directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}${roundContext && roundContext.roundNumber > 1 ? 'Explicitly support or challenge peer assessments by role. ' : ''}Use external research only if needed to resolve the most critical drug-side fact for this hyperedge.`,
+        hypothesisStatement:
+          roundContext?.hypothesisFocus[0] ??
+          hypotheses[0]?.statement ??
+          'The queried relationship exists.',
+        verificationGoal: `Review the complete shared hyperedge context${roundContext?.sharedNodeContext ? ` (${formatSharedNodeBundle(roundContext.sharedNodeContext)})` : ''}. Form a 0/1 judgment for the entire hyperedge. Speak as the side-effect expert. ${roundContext?.roundObjective.sharedDebateQuestion ? `Address this directly: ${roundContext.roundObjective.sharedDebateQuestion}. ` : ''}${roundContext && roundContext.roundNumber > 1 ? 'Explicitly support or challenge peer assessments by role. ' : ''}Use external research only if needed to resolve the most critical side-effect fact for this hyperedge.`,
         expectedEvidence: [
           'complete shared node descriptions for all entities',
           'a whole-hyperedge 0/1 judgment before external retrieval',
-          'drug mechanism, indication, or relevant biomedical evidence',
+          'side-effect plausibility and adverse event evidence',
           'peer findings and shared evidence board',
         ],
         failureRule:
           'After reviewing all evidence and applying your expert judgment, end with a binary 1/0 recommendation and concise rationale.',
         toolCalls: [
           {
-            tool: 'drug_researcher',
-            arguments: researcherArguments,
+            tool: 'sideeffect_researcher',
+            arguments: {
+              cui: sideeffectId,
+              drug_ids: drugIds,
+              review_context: reviewContext,
+            },
           },
         ],
       };
       plannerActions.push(plannerAction);
 
-      let result;
-      if (skipUniChemForRound) {
-        result = {
-          toolName: 'drug_researcher',
-          status: 'ok' as const,
-          textSummary:
-            '[drug_researcher] Skipped UniChem lookup in this round due to a prior UniChem failure.',
-          structured: {
-            drugbank_id: drugId,
-            skipped_due_to_unichem_failure_in_round: true,
-          },
-        };
-      } else {
-        const toolResult = await this.toolAdapter.callTool(
-          'drug_researcher',
-          researcherArguments,
+      const researcherResult = await this.toolAdapter.callTool(
+        'sideeffect_researcher',
+        {
+          cui: sideeffectId,
+          drug_ids: drugIds,
+          review_context: reviewContext,
+        },
+      );
+      if (researcherResult.status !== 'ok') {
+        throw new Error(
+          `sideeffect_researcher failed for sample ${sample.sampleIndex}, sideeffect ${sideeffectId}: ${researcherResult.error ?? 'unknown error'}`,
         );
-        if (toolResult.status !== 'ok') {
-          if (isUniChemFailure(toolResult.error)) {
-            skipUniChemForRound = true;
-            result = {
-              toolName: 'drug_researcher',
-              status: 'ok' as const,
-              textSummary:
-                '[drug_researcher] UniChem failed for this round; switching to no-UniChem mode for remaining drugs in this round.',
-              structured: {
-                drugbank_id: drugId,
-                unichem_error: toolResult.error,
-                skipped_due_to_unichem_failure_in_round: true,
-              },
-            };
-          } else {
-            throw new Error(
-              `drug_researcher failed for sample ${sample.sampleIndex}, drug ${drugId}: ${toolResult.error ?? 'unknown error'}`,
-            );
-          }
-        } else {
-          result = toolResult;
-        }
       }
       const localNodeResult = {
         toolName: 'shared_node_context',
@@ -213,25 +155,34 @@ export class DrugAgent {
         textSummary: localNodeEntry?.summary ?? '',
         structured: localNodeEntry?.structured ?? null,
       };
-      const mergedResult = mergeResearchOutputs(result, localNodeResult);
+      const drugNodeSummaries = (sharedNodeContext?.drug ?? [])
+        .map((entry) => entry.summary)
+        .filter((s): s is string => Boolean(s) && s.trim() !== '');
+      const drugNodeText = drugNodeSummaries.join(' ');
+      const basemerged = mergeResearchOutputs(researcherResult, localNodeResult);
+      const mergedResult = {
+        ...basemerged,
+        textSummary: [drugNodeText, basemerged.textSummary]
+          .filter((s) => s.trim() !== '')
+          .join(' '),
+      };
+
       const reasonerResult = await this.toolAdapter.callTool(
         'biomedical_expert_reasoner',
         {
-          role: 'drug',
+          role: 'sideeffect',
           review_context: reviewContext,
           entity_context: {
             relationshipType: sample.relationshipType,
-            drugbankId: drugId,
             drugIds,
-            proteinId,
-            diseaseId,
+            sideeffectId,
             localNodeContext: localNodeEntry?.structured,
             sharedNodeContext,
           },
           evidence_summary: mergedResult.textSummary,
           evidence_structured: {
             primary_local_node: localNodeEntry?.structured,
-            researcher: result.structured,
+            researcher: researcherResult.structured,
             node_context: localNodeEntry?.structured,
             shared_node_context: sharedNodeContext,
           },
@@ -239,61 +190,66 @@ export class DrugAgent {
       );
       if (reasonerResult.status !== 'ok') {
         throw new Error(
-          `biomedical_expert_reasoner failed for sample ${sample.sampleIndex}, drug ${drugId}: ${reasonerResult.error ?? 'unknown error'}`,
+          `biomedical_expert_reasoner failed for sample ${sample.sampleIndex}, sideeffect ${sideeffectId}: ${reasonerResult.error ?? 'unknown error'}`,
         );
       }
+
       const reasonedOutput = parseStructuredReasonerOutput(
         reasonerResult.structured,
       );
       if (!reasonedOutput) {
         throw new Error(
-          `biomedical_expert_reasoner returned invalid structured output for sample ${sample.sampleIndex}, drug ${drugId}`,
+          `biomedical_expert_reasoner returned invalid structured output for sample ${sample.sampleIndex}, sideeffect ${sideeffectId}`,
         );
       }
-      if (isInformativeToolResult(result)) {
+
+      // Record the researcher tool call as a raw evidence item.
+      if (isInformativeToolResult(researcherResult)) {
         evidenceItems.push({
-          id: `drug-researcher-${sample.sampleIndex}-${drugId}`,
+          id: `sideeffect-researcher-${sample.sampleIndex}-${sideeffectId}`,
           source: this.agentId,
-          toolName: result.toolName,
-          entityScope: [drugId],
+          toolName: researcherResult.toolName,
+          entityScope: [sideeffectId, ...drugIds].slice(0, 4),
           claim:
-            result.textSummary ||
-            `Drug researcher returned no summary for ${drugId}.`,
+            researcherResult.textSummary ||
+            `Sideeffect researcher returned no summary for ${sideeffectId}.`,
           stance: 'contradicts',
           strength: 'moderate',
           structured: {
-            drugbankId: drugId,
-            result: result.structured,
-            status: result.status,
+            sideeffectId,
+            drugIds,
+            result: researcherResult.structured,
+            status: researcherResult.status,
           },
         });
       }
 
       evaluationTrace.push({
-        id: `drug-reasoner-trace-${sample.sampleIndex}-${drugId}`,
+        id: `sideeffect-reasoner-trace-${sample.sampleIndex}-${sideeffectId}`,
         toolName: 'biomedical_expert_reasoner',
         toolArguments: {
-          role: 'drug',
+          role: 'sideeffect',
           roundNumber: roundContext?.roundNumber ?? 1,
           objective: roundContext?.roundObjective,
           sharedEvidenceBoard: roundContext?.sharedEvidenceBoard,
         },
-        entityScope: [drugId],
+        entityScope: [sideeffectId, ...drugIds].slice(0, 4),
         rawToolOutput: reasonerResult,
         interpretedOutput: reasonedOutput,
       });
 
       evidenceItems.push({
-        id: `drug-mechanism-${sample.sampleIndex}-${drugId}`,
+        id: `sideeffect-assessment-${sample.sampleIndex}-${sideeffectId}`,
         source: this.agentId,
         toolName: 'biomedical_expert_reasoner',
-        entityScope: [drugId],
+        entityScope: [sideeffectId, ...drugIds].slice(0, 4),
         claim: reasonedOutput.claim,
         stance: reasonedOutput.stance,
         strength: reasonedOutput.strength,
         structured: {
-          drugbankId: drugId,
-          researcherStatus: result.status,
+          sideeffectId,
+          drugIds,
+          researcherStatus: researcherResult.status,
           nodeContextStatus: localNodeEntry ? 'provided' : 'missing',
           reasonerStructured: reasonerResult.structured,
         },
@@ -308,6 +264,7 @@ export class DrugAgent {
       )
       .map((structured) => structured.recommended_label)
       .filter((value): value is 0 | 1 => value === 0 || value === 1);
+
     const recommendedLabel =
       reasonerVotes.length > 0
         ? reasonerVotes.filter((value) => value === 1).length >
@@ -315,14 +272,15 @@ export class DrugAgent {
           ? 1
           : 0
         : binaryRecommendationFromEvidence(evidenceItems);
+
     const summary =
       recommendedLabel === 1
-        ? 'Drug-side expert votes 1 for the current hypothesis in this round.'
-        : 'Drug-side expert votes 0 for the current hypothesis in this round.';
+        ? 'Side-effect expert votes 1 for the current hypothesis in this round.'
+        : 'Side-effect expert votes 0 for the current hypothesis in this round.';
 
     return {
       agentId: this.agentId,
-      role: 'drug',
+      role: 'sideeffect',
       roundNumber: roundContext?.roundNumber ?? 1,
       recommendedLabel,
       summary,

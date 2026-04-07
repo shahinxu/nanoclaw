@@ -36,7 +36,9 @@ export class PythonResearchToolAdapter implements ResearchToolAdapter {
       };
       if (
         toolName === 'graph_reasoner' ||
-        toolName === 'biomedical_expert_reasoner'
+        toolName === 'biomedical_expert_reasoner' ||
+        toolName === 'hypothesis_generator' ||
+        toolName === 'round_objective_planner'
       ) {
         runtimeArgs.openrouter_api_key_path = this.config.openRouterApiKeyPath;
         runtimeArgs.openrouter_base_url = this.config.openRouterBaseUrl;
