@@ -66,15 +66,15 @@ interface CliOptions {
   openRouterApiKeyPath: string;
   openRouterBaseUrl: string;
   openRouterModel: string;
-  maxRounds: number;        // rounds for drug_drug_disease debate
-  maxSERounds: number;      // rounds for drug_drug_sideeffect debate
-  concurrency: number;      // concurrency for Stage 1
-  seConcurrency: number;    // concurrency for Stage 2
-  topKSideEffects: number;  // max side effects per pair (0 = all)
-  tiers: TierName[];        // which tiers to run
-  tierBLimit: number;       // max pairs from Tier B (0 = all)
-  tierCLimit: number;       // max pairs from Tier C (0 = all)
-  tierDLimit: number;       // max pairs from Tier D (0 = all)
+  maxRounds: number; // rounds for drug_drug_disease debate
+  maxSERounds: number; // rounds for drug_drug_sideeffect debate
+  concurrency: number; // concurrency for Stage 1
+  seConcurrency: number; // concurrency for Stage 2
+  topKSideEffects: number; // max side effects per pair (0 = all)
+  tiers: TierName[]; // which tiers to run
+  tierBLimit: number; // max pairs from Tier B (0 = all)
+  tierCLimit: number; // max pairs from Tier C (0 = all)
+  tierDLimit: number; // max pairs from Tier D (0 = all)
   outputPath: string;
 }
 
@@ -103,24 +103,80 @@ function parseArgs(argv: string[]): CliOptions {
     const arg = argv[i];
     const next = argv[i + 1];
     switch (arg) {
-      case '--diseaseId':       opts.diseaseId = next; i += 1; break;
-      case '--trainingDir':     opts.trainingDir = next; i += 1; break;
-      case '--workspaceRoot':   opts.workspaceRoot = next; i += 1; break;
-      case '--dataDir':         opts.dataDir = next; i += 1; break;
-      case '--pythonExecutable': opts.pythonExecutable = next; i += 1; break;
-      case '--openRouterApiKeyPath': opts.openRouterApiKeyPath = next; i += 1; break;
-      case '--openRouterBaseUrl': opts.openRouterBaseUrl = next; i += 1; break;
-      case '--openRouterModel': opts.openRouterModel = next; i += 1; break;
-      case '--maxRounds':       opts.maxRounds = Number.parseInt(next, 10); i += 1; break;
-      case '--maxSERounds':     opts.maxSERounds = Number.parseInt(next, 10); i += 1; break;
-      case '--concurrency':     opts.concurrency = Number.parseInt(next, 10); i += 1; break;
-      case '--seConcurrency':   opts.seConcurrency = Number.parseInt(next, 10); i += 1; break;
-      case '--topKSideEffects': opts.topKSideEffects = Number.parseInt(next, 10); i += 1; break;
-      case '--tiers':           opts.tiers = next.split(',').map((t) => t.trim().toUpperCase() as TierName); i += 1; break;
-      case '--tierBLimit':      opts.tierBLimit = Number.parseInt(next, 10); i += 1; break;
-      case '--tierCLimit':      opts.tierCLimit = Number.parseInt(next, 10); i += 1; break;
-      case '--tierDLimit':      opts.tierDLimit = Number.parseInt(next, 10); i += 1; break;
-      case '--outputPath':      opts.outputPath = next; i += 1; break;
+      case '--diseaseId':
+        opts.diseaseId = next;
+        i += 1;
+        break;
+      case '--trainingDir':
+        opts.trainingDir = next;
+        i += 1;
+        break;
+      case '--workspaceRoot':
+        opts.workspaceRoot = next;
+        i += 1;
+        break;
+      case '--dataDir':
+        opts.dataDir = next;
+        i += 1;
+        break;
+      case '--pythonExecutable':
+        opts.pythonExecutable = next;
+        i += 1;
+        break;
+      case '--openRouterApiKeyPath':
+        opts.openRouterApiKeyPath = next;
+        i += 1;
+        break;
+      case '--openRouterBaseUrl':
+        opts.openRouterBaseUrl = next;
+        i += 1;
+        break;
+      case '--openRouterModel':
+        opts.openRouterModel = next;
+        i += 1;
+        break;
+      case '--maxRounds':
+        opts.maxRounds = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--maxSERounds':
+        opts.maxSERounds = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--concurrency':
+        opts.concurrency = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--seConcurrency':
+        opts.seConcurrency = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--topKSideEffects':
+        opts.topKSideEffects = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--tiers':
+        opts.tiers = next
+          .split(',')
+          .map((t) => t.trim().toUpperCase() as TierName);
+        i += 1;
+        break;
+      case '--tierBLimit':
+        opts.tierBLimit = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--tierCLimit':
+        opts.tierCLimit = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--tierDLimit':
+        opts.tierDLimit = Number.parseInt(next, 10);
+        i += 1;
+        break;
+      case '--outputPath':
+        opts.outputPath = next;
+        i += 1;
+        break;
     }
   }
   return opts;
@@ -307,10 +363,7 @@ async function discoverDrugs(
       const parts = line.split(',');
       if (parts.length < 5) continue;
       const [rel, d1, d2] = parts;
-      if (
-        rel !== 'drug_drug_sideeffect' &&
-        rel !== 'drug_drug_cell-line'
-      )
+      if (rel !== 'drug_drug_sideeffect' && rel !== 'drug_drug_cell-line')
         continue;
       if (knownHS.has(d1) && d2.startsWith('DB') && !knownHS.has(d2)) {
         cooccurDrugs.add(d2);
@@ -355,7 +408,12 @@ function generateTieredPairs(
     const key = d1 < d2 ? `${d1}::${d2}` : `${d2}::${d1}`;
     if (seenKeys.has(key)) return;
     seenKeys.add(key);
-    pairs.push({ drug1: d1 < d2 ? d1 : d2, drug2: d1 < d2 ? d2 : d1, tier, score });
+    pairs.push({
+      drug1: d1 < d2 ? d1 : d2,
+      drug2: d1 < d2 ? d2 : d1,
+      tier,
+      score,
+    });
   }
 
   const hsArr = [...discovery.knownHS].sort();
@@ -379,7 +437,12 @@ function generateTieredPairs(
     let count = 0;
     for (const candidate of sorted) {
       for (const hs of hsArr) {
-        addPair(candidate, hs, 'B', discovery.mechanismBreadth.get(candidate) ?? 0);
+        addPair(
+          candidate,
+          hs,
+          'B',
+          discovery.mechanismBreadth.get(candidate) ?? 0,
+        );
         count += 1;
       }
       if (opts.tierBLimit > 0 && count >= opts.tierBLimit) break;
@@ -399,7 +462,12 @@ function generateTieredPairs(
     let count = 0;
     for (const candidate of candidatesC) {
       for (const hs of hsArr) {
-        addPair(candidate, hs, 'C', discovery.neighborBreadth.get(candidate) ?? 0);
+        addPair(
+          candidate,
+          hs,
+          'C',
+          discovery.neighborBreadth.get(candidate) ?? 0,
+        );
         count += 1;
       }
       if (opts.tierCLimit > 0 && count >= opts.tierCLimit) break;
@@ -816,17 +884,23 @@ function classifyPairs(
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
-  console.log(`\n╔═══════════════════════════════════════════════════════════╗`);
+  console.log(
+    `\n╔═══════════════════════════════════════════════════════════╗`,
+  );
   console.log(`║  Drug-Drug-Disease Pipeline for HS  (Multi-Strategy)     ║`);
   console.log(`╚═══════════════════════════════════════════════════════════╝`);
   console.log(`Disease          : ${opts.diseaseId}`);
   console.log(`Training dir     : ${opts.trainingDir}`);
   console.log(`Tiers            : ${opts.tiers.join(', ')}`);
-  console.log(`Tier limits      : B=${opts.tierBLimit || 'all'}  C=${opts.tierCLimit || 'all'}  D=${opts.tierDLimit || 'all'}`);
+  console.log(
+    `Tier limits      : B=${opts.tierBLimit || 'all'}  C=${opts.tierCLimit || 'all'}  D=${opts.tierDLimit || 'all'}`,
+  );
   console.log(`Stage 1 rounds   : ${opts.maxRounds}`);
   console.log(`Stage 2 SE rounds: ${opts.maxSERounds}`);
   console.log(`Top-K SEs/pair   : ${opts.topKSideEffects || 'all'}`);
-  console.log(`Concurrency      : Stage1=${opts.concurrency}  Stage2=${opts.seConcurrency}`);
+  console.log(
+    `Concurrency      : Stage1=${opts.concurrency}  Stage2=${opts.seConcurrency}`,
+  );
   console.log(`Output           : ${opts.outputPath}\n`);
 
   // ── Stage 0a: Multi-strategy drug discovery ───────────────────────────
@@ -834,19 +908,28 @@ async function main() {
   console.log('Running 4-strategy drug discovery...\n');
   const discovery = await discoverDrugs(opts.trainingDir, opts.diseaseId);
 
-  console.log(`Strategy 1 — Known HS drugs          : ${discovery.knownHS.size}`);
+  console.log(
+    `Strategy 1 — Known HS drugs          : ${discovery.knownHS.size}`,
+  );
   for (const d of [...discovery.knownHS].sort()) console.log(`    ${d}`);
   console.log(`  (mechanism proteins: ${discovery.hsProteins.size})`);
 
-  console.log(`Strategy 2 — Mechanism-sharing drugs  : ${discovery.mechanismDrugs.size}`);
+  console.log(
+    `Strategy 2 — Mechanism-sharing drugs  : ${discovery.mechanismDrugs.size}`,
+  );
   const topMech = [...discovery.mechanismBreadth.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10);
   for (const [d, b] of topMech) console.log(`    ${d} (shared proteins: ${b})`);
-  if (discovery.mechanismDrugs.size > 10) console.log(`    ... and ${discovery.mechanismDrugs.size - 10} more`);
+  if (discovery.mechanismDrugs.size > 10)
+    console.log(`    ... and ${discovery.mechanismDrugs.size - 10} more`);
 
-  console.log(`Strategy 3 — Neighbor-disease drugs   : ${discovery.neighborDiseaseDrugs.size}`);
-  console.log(`Strategy 4 — Co-occurrence drugs      : ${discovery.cooccurDrugs.size}`);
+  console.log(
+    `Strategy 3 — Neighbor-disease drugs   : ${discovery.neighborDiseaseDrugs.size}`,
+  );
+  console.log(
+    `Strategy 4 — Co-occurrence drugs      : ${discovery.cooccurDrugs.size}`,
+  );
 
   const allUnique = new Set([
     ...discovery.knownHS,
@@ -874,7 +957,9 @@ async function main() {
     allDrugsInPairs.add(p.drug2);
   }
 
-  console.log(`\nBuilding side-effect profiles for ${allDrugsInPairs.size} drugs...`);
+  console.log(
+    `\nBuilding side-effect profiles for ${allDrugsInPairs.size} drugs...`,
+  );
   const seProfiles = await collectDrugSideEffectProfiles(
     opts.trainingDir,
     allDrugsInPairs,
@@ -914,28 +999,41 @@ async function main() {
       tierD: tierCounts.D,
       total: tieredPairs.length,
     },
-    stage1: { effective: [] as Stage1Result[], ineffective: [] as Stage1Result[], errors: [] as Stage1Result[] },
+    stage1: {
+      effective: [] as Stage1Result[],
+      ineffective: [] as Stage1Result[],
+      errors: [] as Stage1Result[],
+    },
     stage2: [] as Stage2PairResult[],
     summary: null as Record<ThreeWayLabel, number> | null,
     classified: null as ClassifiedPair[] | null,
   };
 
   function flushOutput() {
-    fs.writeFileSync(opts.outputPath, JSON.stringify(liveOutput, null, 2), 'utf8');
+    fs.writeFileSync(
+      opts.outputPath,
+      JSON.stringify(liveOutput, null, 2),
+      'utf8',
+    );
   }
   flushOutput(); // write initial structure
 
   // ── Stage 1: drug_drug_disease debate ─────────────────────────────────
-  const stage1Results = await runStage1(tieredPairs, opts.diseaseId, opts, (r) => {
-    if (r.error) {
-      liveOutput.stage1.errors.push(r);
-    } else if (r.predictedLabel === 1) {
-      liveOutput.stage1.effective.push(r);
-    } else {
-      liveOutput.stage1.ineffective.push(r);
-    }
-    flushOutput();
-  });
+  const stage1Results = await runStage1(
+    tieredPairs,
+    opts.diseaseId,
+    opts,
+    (r) => {
+      if (r.error) {
+        liveOutput.stage1.errors.push(r);
+      } else if (r.predictedLabel === 1) {
+        liveOutput.stage1.effective.push(r);
+      } else {
+        liveOutput.stage1.ineffective.push(r);
+      }
+      flushOutput();
+    },
+  );
 
   const effectivePairs = stage1Results.filter(
     (r) => r.predictedLabel === 1 && !r.error,
@@ -956,7 +1054,9 @@ async function main() {
     const ineff = ineffectivePairs.filter((r) => r.tier === t).length;
     const err = errorPairs.filter((r) => r.tier === t).length;
     if (eff + ineff + err > 0) {
-      console.log(`    Tier ${t}: ${eff} effective, ${ineff} ineffective, ${err} errors`);
+      console.log(
+        `    Tier ${t}: ${eff} effective, ${ineff} ineffective, ${err} errors`,
+      );
     }
   }
 
@@ -964,7 +1064,11 @@ async function main() {
   let stage2Results: Stage2PairResult[] = [];
   if (effectivePairs.length > 0) {
     stage2Results = await runStage2(
-      effectivePairs.map((p) => ({ drug1: p.drug1, drug2: p.drug2, tier: p.tier })),
+      effectivePairs.map((p) => ({
+        drug1: p.drug1,
+        drug2: p.drug2,
+        tier: p.tier,
+      })),
       seProfiles,
       opts,
       (pr) => {
@@ -1010,10 +1114,18 @@ async function main() {
   for (const t of ['A', 'B', 'C', 'D'] as TierName[]) {
     const tierItems = classified.filter((c) => c.tier === t);
     if (tierItems.length === 0) continue;
-    const safe = tierItems.filter((c) => c.threeWayLabel === 'effective_no_sideeffect').length;
-    const withSE = tierItems.filter((c) => c.threeWayLabel === 'effective_with_sideeffect').length;
-    const ineff = tierItems.filter((c) => c.threeWayLabel === 'ineffective').length;
-    console.log(`  Tier ${t}: ${safe} safe, ${withSE} with-SE, ${ineff} ineffective`);
+    const safe = tierItems.filter(
+      (c) => c.threeWayLabel === 'effective_no_sideeffect',
+    ).length;
+    const withSE = tierItems.filter(
+      (c) => c.threeWayLabel === 'effective_with_sideeffect',
+    ).length;
+    const ineff = tierItems.filter(
+      (c) => c.threeWayLabel === 'ineffective',
+    ).length;
+    console.log(
+      `  Tier ${t}: ${safe} safe, ${withSE} with-SE, ${ineff} ineffective`,
+    );
   }
   console.log('');
 

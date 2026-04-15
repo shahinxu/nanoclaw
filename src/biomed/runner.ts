@@ -470,7 +470,7 @@ function createCrossAgentMismatchQuestion(
         ? `drug-drug-${cellline}`
         : sample.relationshipType === 'drug_drug_disease'
           ? `drug-drug-${disease}`
-        : `${drug}-${protein}-${disease}`;
+          : `${drug}-${protein}-${disease}`;
 
   if (persistenceCount >= 3) {
     return `After repeated disagreement, should the team stop defending the direct ${contextLabel} relation and switch to a narrower alternative mechanism?`;
