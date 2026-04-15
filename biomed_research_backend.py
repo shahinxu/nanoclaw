@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -11,6 +12,12 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+
+
+DEFAULT_OPENROUTER_MODEL = os.getenv(
+    'BIOMED_OPENROUTER_MODEL',
+    os.getenv('OPENROUTER_MODEL', 'models/Llama-3.1-8B-Instruct'),
+)
 
 
 def _normalize_review_context(value: Any) -> Dict[str, Any]:
@@ -50,11 +57,11 @@ def _node_context_row(
     if not root_text or not lookup_id:
         return None
     node_specs = {
-        'drug': ('data_node/node_drug_SMILES.csv', 'drugbank_id'),
+        'drug': ('data_node/node_drug_smiles.csv', 'drugbank_id'),
         'protein': ('data_node/node_protein_sequence.csv', 'gene_symbol'),
         'disease': ('data_node/node_disease_def.csv', 'mondo_id'),
-        'cellline': ('data_node/node_cell-line_descriptions.csv', 'cvcl_id'),
-        'sideeffect': ('data_node/node_side-effect_description.csv', 'CUI'),
+        'cellline': ('data_node/node_cell_line_descriptions.csv', 'cvcl_id'),
+        'sideeffect': ('data_node/node_side_effect_description.csv', 'CUI'),
     }
     spec = node_specs.get(entity_type)
     if spec is None:
@@ -343,11 +350,11 @@ def _node_context(arguments: Dict[str, Any]) -> Dict[str, Any]:
     entity_id = str(arguments.get('entity_id') or '').strip()
 
     node_specs = {
-        'drug': ('data_node/node_drug_SMILES.csv', 'drugbank_id'),
+        'drug': ('data_node/node_drug_smiles.csv', 'drugbank_id'),
         'protein': ('data_node/node_protein_sequence.csv', 'gene_symbol'),
         'disease': ('data_node/node_disease_def.csv', 'mondo_id'),
-        'cellline': ('data_node/node_cell-line_descriptions.csv', 'cvcl_id'),
-        'sideeffect': ('data_node/node_side-effect_description.csv', 'CUI'),
+        'cellline': ('data_node/node_cell_line_descriptions.csv', 'cvcl_id'),
+        'sideeffect': ('data_node/node_side_effect_description.csv', 'CUI'),
     }
 
     if entity_type not in node_specs or not entity_id or not workspace_root:
@@ -429,8 +436,10 @@ def _parse_json_object(text: str) -> Optional[Dict[str, Any]]:
 def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     review = _normalize_review_context(arguments.get('review_context'))
     api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
-    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
-    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    base_url = str(arguments.get('openrouter_base_url') or 'http://localhost:8000/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or DEFAULT_OPENROUTER_MODEL).strip()
+    if not api_key:
+        api_key = 'local'
     graph_summary = str(arguments.get('graph_summary') or '').strip()
     graph_structured = arguments.get('graph_structured')
     relationship_type = str(arguments.get('relationship_type') or '').strip()
@@ -439,13 +448,12 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         hyperedge_label = 'drug-drug-sideeffect hyperedge'
     elif relationship_type == 'drug_drug_cell-line':
         hyperedge_label = 'drug-drug-cell-line hyperedge'
+    elif relationship_type == 'drug_drug_disease':
+        hyperedge_label = 'drug-drug-disease hyperedge'
     elif relationship_type:
         hyperedge_label = f'{relationship_type} hyperedge'
     else:
         hyperedge_label = 'drug-protein-disease hyperedge'
-
-    if not api_key:
-        raise ValueError('OpenRouter API key is missing for graph_reasoner.')
 
     prompt_payload = {
         'task': f'Act as the graph-side expert in the current debate and decide whether the graph evidence supports or contradicts the queried {hyperedge_label}.',
@@ -525,8 +533,12 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     label_value = parsed.get('recommended_label')
     try:
         label = 1 if int(label_value) == 1 else 0
-    except Exception as exc:
-        raise ValueError('graph_reasoner returned invalid recommended_label.') from exc
+    except Exception:
+        lv = str(label_value or '').strip().lower()
+        if lv in ('1', 'yes', 'true', 'positive', 'support', 'supports'):
+            label = 1
+        else:
+            label = 0
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
         stance = 'supports' if label == 1 else 'contradicts'
@@ -550,15 +562,14 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     review = _normalize_review_context(arguments.get('review_context'))
     api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
-    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
-    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    base_url = str(arguments.get('openrouter_base_url') or 'http://localhost:8000/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or DEFAULT_OPENROUTER_MODEL).strip()
+    if not api_key:
+        api_key = 'local'
     role = str(arguments.get('role') or 'biomedical').strip().lower() or 'biomedical'
     evidence_summary = str(arguments.get('evidence_summary') or '').strip()
     evidence_structured = arguments.get('evidence_structured')
     entity_context = arguments.get('entity_context')
-
-    if not api_key:
-        raise ValueError('OpenRouter API key is missing for biomedical_expert_reasoner.')
 
     relationship_type = ''
     if isinstance(entity_context, dict):
@@ -569,6 +580,8 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
         hyperedge_label = 'drug-set-sideeffect hyperedge (does the queried drug set, considered jointly, support the queried adverse effect / side effect?)'
     elif relationship_type == 'drug_drug_cell-line' or role == 'cellline':
         hyperedge_label = 'drug-set-cell-line hyperedge (does the queried drug set, considered jointly, support a relevant response in the queried cell line?)'
+    elif relationship_type == 'drug_drug_disease':
+        hyperedge_label = 'drug-set-disease hyperedge (does the queried drug set, considered jointly, support meaningful disease-relevant efficacy in the queried disease context?)'
     else:
         hyperedge_label = 'drug-protein-disease triplet (does the queried drug act on the queried protein in the context of the queried disease?)'
 
@@ -657,8 +670,12 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     label_value = parsed.get('recommended_label')
     try:
         label = 1 if int(label_value) == 1 else 0
-    except Exception as exc:
-        raise ValueError('biomedical_expert_reasoner returned invalid recommended_label.') from exc
+    except Exception:
+        lv = str(label_value or '').strip().lower()
+        if lv in ('1', 'yes', 'true', 'positive', 'support', 'supports'):
+            label = 1
+        else:
+            label = 0
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
         stance = 'supports' if label == 1 else 'contradicts'
@@ -692,10 +709,10 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _hypothesis_generator(arguments: Dict[str, Any]) -> Dict[str, Any]:
     api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
     if not api_key:
-        raise ValueError('OpenRouter API key is missing for hypothesis generation.')
+        api_key = 'local'
 
-    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
-    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    base_url = str(arguments.get('openrouter_base_url') or 'http://localhost:8000/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or DEFAULT_OPENROUTER_MODEL).strip()
     sample = arguments.get('sample')
     if not isinstance(sample, dict):
         raise ValueError('hypothesis_generator requires a valid sample object.')
@@ -790,10 +807,10 @@ def _hypothesis_generator(arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _round_objective_planner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
     if not api_key:
-        raise ValueError('OpenRouter API key is missing for round objective planning.')
+        api_key = 'local'
 
-    base_url = str(arguments.get('openrouter_base_url') or 'https://openrouter.ai/api/v1').rstrip('/')
-    model = str(arguments.get('openrouter_model') or 'openai/gpt-4.1-mini').strip()
+    base_url = str(arguments.get('openrouter_base_url') or 'http://localhost:8000/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or DEFAULT_OPENROUTER_MODEL).strip()
     round_number = int(arguments.get('round_number') or 1)
     relationship_type = str(arguments.get('relationship_type') or '').strip() or 'unknown'
     all_roles = arguments.get('all_roles')
@@ -1787,21 +1804,20 @@ def _fetch_chembl_molecule_from_drugbank(drugbank_id: str) -> Optional[Dict[str,
 @lru_cache(maxsize=4096)
 def _fetch_chembl_id_from_drugbank(drugbank_id: str) -> Optional[str]:
     payload = {'compound': drugbank_id, 'type': 'sourceID', 'sourceID': 2}
-    response = _http_post(
-        'https://www.ebi.ac.uk/unichem/api/v1/compounds',
-        json_payload=payload,
-        timeout=10,
-    )
-    if not response.ok:
-        raise RuntimeError(
-            f'UniChem API returned HTTP {response.status_code} for DrugBank ID {drugbank_id!r}.'
+    try:
+        response = _http_post(
+            'https://www.ebi.ac.uk/unichem/api/v1/compounds',
+            json_payload=payload,
+            timeout=10,
         )
+    except Exception:
+        return None
+    if not response.ok:
+        return None
     try:
         response_payload = response.json()
     except Exception:
-        raise RuntimeError(
-            f'UniChem API returned unreadable JSON for DrugBank ID {drugbank_id!r}.'
-        )
+        return None
     compounds = response_payload.get('compounds') or []
     for compound in compounds:
         if not isinstance(compound, dict):
@@ -1819,62 +1835,59 @@ def _fetch_chembl_id_from_drugbank(drugbank_id: str) -> Optional[str]:
 
 @lru_cache(maxsize=4096)
 def _fetch_chembl_molecule_by_id(chembl_id: str) -> Optional[Dict[str, Any]]:
-    response = _http_get(
-        f'https://www.ebi.ac.uk/chembl/api/data/molecule/{chembl_id}',
-        params={'format': 'json'},
-        timeout=10,
-    )
-    if not response.ok:
-        raise RuntimeError(
-            f'ChEMBL molecule API returned HTTP {response.status_code} for {chembl_id!r}.'
+    try:
+        response = _http_get(
+            f'https://www.ebi.ac.uk/chembl/api/data/molecule/{chembl_id}',
+            params={'format': 'json'},
+            timeout=10,
         )
+    except Exception:
+        return None
+    if not response.ok:
+        return None
     try:
         payload = response.json()
     except Exception:
-        raise RuntimeError(
-            f'ChEMBL molecule API returned unreadable JSON for {chembl_id!r}.'
-        )
+        return None
     if isinstance(payload, dict) and payload.get('molecule_chembl_id'):
         return payload
     return None
 
 
 def _fetch_chembl_mechanisms(chembl_id: str) -> List[Dict[str, Any]]:
-    response = _http_get(
-        'https://www.ebi.ac.uk/chembl/api/data/mechanism',
-        params={'molecule_chembl_id': chembl_id, 'format': 'json'},
-        timeout=10,
-    )
-    if not response.ok:
-        raise RuntimeError(
-            f'ChEMBL mechanism API returned HTTP {response.status_code} for {chembl_id!r}.'
+    try:
+        response = _http_get(
+            'https://www.ebi.ac.uk/chembl/api/data/mechanism',
+            params={'molecule_chembl_id': chembl_id, 'format': 'json'},
+            timeout=10,
         )
+    except Exception:
+        return []
+    if not response.ok:
+        return []
     try:
         payload = response.json()
     except Exception:
-        raise RuntimeError(
-            f'ChEMBL mechanism API returned unreadable JSON for {chembl_id!r}.'
-        )
+        return []
     mechanisms = payload.get('mechanisms') or []
     return [item for item in mechanisms if isinstance(item, dict)]
 
 
 def _fetch_chembl_indications(chembl_id: str) -> List[Dict[str, Any]]:
-    response = _http_get(
-        'https://www.ebi.ac.uk/chembl/api/data/drug_indication',
-        params={'molecule_chembl_id': chembl_id, 'format': 'json', 'limit': 200},
-        timeout=10,
-    )
-    if not response.ok:
-        raise RuntimeError(
-            f'ChEMBL indication API returned HTTP {response.status_code} for {chembl_id!r}.'
+    try:
+        response = _http_get(
+            'https://www.ebi.ac.uk/chembl/api/data/drug_indication',
+            params={'molecule_chembl_id': chembl_id, 'format': 'json', 'limit': 200},
+            timeout=10,
         )
+    except Exception:
+        return []
+    if not response.ok:
+        return []
     try:
         payload = response.json()
     except Exception:
-        raise RuntimeError(
-            f'ChEMBL indication API returned unreadable JSON for {chembl_id!r}.'
-        )
+        return []
     indications = payload.get('drug_indications') or []
     return [item for item in indications if isinstance(item, dict)]
 
@@ -2002,7 +2015,7 @@ def _sideeffect_researcher(
             'sources': [
                 {
                     'type': 'local_node',
-                    'csv': 'data_node/node_side-effect_description.csv',
+                    'csv': 'data_node/node_side_effect_description.csv',
                     'key': 'CUI',
                     'found': local_row is not None,
                 },

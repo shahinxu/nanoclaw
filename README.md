@@ -109,6 +109,31 @@ From the main channel (your self-chat), you can manage groups and tasks:
 @Andy join the Family Chat group
 ```
 
+## Biomed Workflow Commands
+
+The biomed multi-agent debate workflow is available as first-class npm commands.
+
+```bash
+npm run biomed:eval -- --relationshipType drug_protein_disease --sampleCount 100 --outputPath ./outputs/eval.json
+npm run biomed:case-study -- --relationshipType drug_drug_sideeffect --sampleIndex 12 --outputPath ./outputs/case_12.json
+npm run biomed:explore -- --diseaseId MONDO:0006559 --trainingDir ./data_edge_train --outputPath ./outputs/explore.json
+```
+
+All biomed commands use environment-first defaults (no hardcoded absolute paths).
+You can override any value via env vars or CLI flags.
+
+```bash
+export BIOMED_WORKSPACE_ROOT=/path/to/project-root
+export BIOMED_DATA_DIR=/path/to/data_edge_test
+export BIOMED_GRAPH_DATA_DIR=/path/to/data_edge_train
+export BIOMED_PYTHON_EXECUTABLE=/path/to/python
+export BIOMED_OPENROUTER_API_KEY_PATH=/path/to/openrouter_api_key.txt
+export BIOMED_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+export BIOMED_OPENROUTER_MODEL=models/Llama-3.1-8B-Instruct
+```
+
+CLI flags with the same names always take precedence for a specific run, e.g. `--openRouterModel`, `--dataDir`, `--pythonExecutable`.
+
 ## Customizing
 
 NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:

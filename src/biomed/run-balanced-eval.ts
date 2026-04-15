@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { DEFAULT_BIOMED_CONFIG } from './config.js';
 import { BiomedWorkflowRunner } from './runner.js';
 import { CsvTaskLoader } from './task-loader.js';
 import type { BiomedTaskSample, WorkflowResult } from './types.js';
@@ -11,6 +12,11 @@ interface CliOptions {
   seed: number;
   dataDir: string;
   graphDataDir: string;
+  workspaceRoot: string;
+  pythonExecutable: string;
+  openRouterApiKeyPath: string;
+  openRouterBaseUrl: string;
+  openRouterModel: string;
   maxRounds: number;
   concurrency: number;
   outputPath?: string;
@@ -43,9 +49,14 @@ function parseArgs(argv: string[]): CliOptions {
     relationshipType: 'drug_protein_disease',
     sampleCount: 100,
     seed: 42,
-    dataDir: '/home/zhx/drug_agent/data_edge_test',
-    graphDataDir: '/home/zhx/drug_agent/data_edge_train',
-    maxRounds: 5,
+    dataDir: DEFAULT_BIOMED_CONFIG.dataDir,
+    graphDataDir: DEFAULT_BIOMED_CONFIG.graphDataDir,
+    workspaceRoot: DEFAULT_BIOMED_CONFIG.workspaceRoot,
+    pythonExecutable: DEFAULT_BIOMED_CONFIG.pythonExecutable,
+    openRouterApiKeyPath: DEFAULT_BIOMED_CONFIG.openRouterApiKeyPath,
+    openRouterBaseUrl: DEFAULT_BIOMED_CONFIG.openRouterBaseUrl,
+    openRouterModel: DEFAULT_BIOMED_CONFIG.openRouterModel,
+    maxRounds: DEFAULT_BIOMED_CONFIG.maxRounds,
     concurrency: 4,
   };
 
@@ -66,6 +77,21 @@ function parseArgs(argv: string[]): CliOptions {
       index += 1;
     } else if (arg === '--graphDataDir' && next) {
       options.graphDataDir = next;
+      index += 1;
+    } else if (arg === '--workspaceRoot' && next) {
+      options.workspaceRoot = next;
+      index += 1;
+    } else if (arg === '--pythonExecutable' && next) {
+      options.pythonExecutable = next;
+      index += 1;
+    } else if (arg === '--openRouterApiKeyPath' && next) {
+      options.openRouterApiKeyPath = next;
+      index += 1;
+    } else if (arg === '--openRouterBaseUrl' && next) {
+      options.openRouterBaseUrl = next;
+      index += 1;
+    } else if (arg === '--openRouterModel' && next) {
+      options.openRouterModel = next;
       index += 1;
     } else if (arg === '--maxRounds' && next) {
       options.maxRounds = Number.parseInt(next, 10);
@@ -358,9 +384,14 @@ async function main(): Promise<void> {
   const sampled = balancedSample(allSamples, options.sampleCount, options.seed);
 
   const runner = new BiomedWorkflowRunner({
+    workspaceRoot: options.workspaceRoot,
     relationshipType: options.relationshipType,
     dataDir: options.dataDir,
     graphDataDir: options.graphDataDir,
+    pythonExecutable: options.pythonExecutable,
+    openRouterApiKeyPath: options.openRouterApiKeyPath,
+    openRouterBaseUrl: options.openRouterBaseUrl,
+    openRouterModel: options.openRouterModel,
     writeTrace: false,
     maxRounds: options.maxRounds,
   });

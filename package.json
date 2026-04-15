@@ -15,6 +15,10 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
+    "biomed:eval": "tsx src/biomed/run-balanced-eval.ts",
+    "biomed:case-study": "tsx src/biomed/export-case-study.ts",
+    "biomed:explore": "tsx src/biomed/explore-disease.ts",
+    "biomed:ddd-pipeline": "tsx src/biomed/explore-drug-drug-disease.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -42,7 +42,7 @@ export class PythonResearchToolAdapter implements ResearchToolAdapter {
       ) {
         runtimeArgs.openrouter_api_key_path = this.config.openRouterApiKeyPath;
         runtimeArgs.openrouter_base_url = this.config.openRouterBaseUrl;
-        runtimeArgs.openrouter_model = 'openai/gpt-4.1-mini';
+        runtimeArgs.openrouter_model = this.config.openRouterModel;
       }
       const { stdout } = await execFileAsync(
         this.config.pythonExecutable,

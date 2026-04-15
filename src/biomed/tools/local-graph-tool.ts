@@ -144,6 +144,18 @@ function queryHyperedgeFromSample(
     return { relationship, entities: [...uniqueStrings(drugs), cellline] };
   }
 
+  if (relationship === 'drug_drug_disease') {
+    const drugs = readEntityList(sample, 'drugs');
+    const disease = readEntity(sample, 'disease');
+    if (drugs.length === 0 || !disease) {
+      return {
+        error: 'Missing required entities for drug_drug_disease.',
+        details: 'Required: drugs (array) and disease.',
+      };
+    }
+    return { relationship, entities: [...uniqueStrings(drugs), disease] };
+  }
+
   return {
     error: `Unsupported relationship type for local_graph_tool: ${relationship}.`,
     details:

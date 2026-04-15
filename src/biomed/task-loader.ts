@@ -39,6 +39,11 @@ export function getRelationshipStructure(
       lastEntityType: 'sideeffect',
       isFixedOrder: false,
     },
+    drug_drug_disease: {
+      entityTypes: ['drug'],
+      lastEntityType: 'disease',
+      isFixedOrder: false,
+    },
     'drug_drug_cell-line': {
       entityTypes: ['drug'],
       lastEntityType: 'cellline',

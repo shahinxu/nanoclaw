@@ -57,6 +57,13 @@ function getRolePlan(sample: BiomedTaskSample): {
     };
   }
 
+  if (sample.relationshipType === 'drug_drug_disease') {
+    return {
+      allRoles: ['drug', 'disease', 'graph'],
+      biomedRoles: ['drug', 'disease'],
+    };
+  }
+
   return {
     allRoles: ['drug', 'protein', 'disease', 'graph'],
     biomedRoles: ['drug', 'protein', 'disease'],
@@ -330,6 +337,7 @@ function createRoleGapQuestion(
   persistenceCount = 1,
 ): string {
   const drug = describeDrugSet(sample);
+  const isDrugDrugDisease = sample.relationshipType === 'drug_drug_disease';
   const protein = getPrimaryEntity(sample, 'protein') ?? 'the queried protein';
   const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
   const sideeffect =
@@ -338,6 +346,15 @@ function createRoleGapQuestion(
     getPrimaryEntity(sample, 'cellline') ?? 'the queried cell-line';
 
   if (role === 'drug') {
+    if (isDrugDrugDisease) {
+      if (persistenceCount >= 3) {
+        return `Should the team stop defending the current ${drug} disease-alignment story for ${disease}, and switch to a narrower alternative disease mechanism?`;
+      }
+      if (persistenceCount === 2) {
+        return `What missing drug-pair fact would make the ${drug} disease-alignment story convincing for ${disease}?`;
+      }
+      return `Does the drug-side case justify keeping a positive vote for the ${drug} relation in disease ${disease}?`;
+    }
     if (persistenceCount >= 3) {
       return `Should the team stop defending ${protein} as the main way ${drug} connects to ${disease}, and instead consider a narrower alternative mechanism?`;
     }
@@ -366,10 +383,19 @@ function createRoleGapQuestion(
       : `Does the cell-line evidence actually support ${cellline} as a meaningful response context for the queried drug set?`;
   }
   if (persistenceCount >= 3) {
+    if (isDrugDrugDisease) {
+      return `If ${disease} support remains weak for ${drug}, should the team stop preserving the same positive story?`;
+    }
     return `If ${disease} still does not implicate ${protein}, should the team stop preserving the same positive story?`;
   }
   if (persistenceCount === 2) {
+    if (isDrugDrugDisease) {
+      return `What missing disease-side fact would make ${drug} look disease-relevant in ${disease}?`;
+    }
     return `What missing disease-side fact would make ${protein} look disease-relevant in ${disease}?`;
+  }
+  if (isDrugDrugDisease) {
+    return `Does the disease-side case actually support ${drug} as relevant to ${disease}?`;
   }
   return `Does the disease-side case actually support ${protein} as relevant to ${disease}?`;
 }
@@ -380,6 +406,7 @@ function createRoleContradictionQuestion(
   persistenceCount = 1,
 ): string {
   const drug = describeDrugSet(sample);
+  const isDrugDrugDisease = sample.relationshipType === 'drug_drug_disease';
   const protein = getPrimaryEntity(sample, 'protein') ?? 'the queried protein';
   const disease = getPrimaryEntity(sample, 'disease') ?? 'the queried disease';
   const sideeffect =
@@ -388,6 +415,11 @@ function createRoleContradictionQuestion(
     getPrimaryEntity(sample, 'cellline') ?? 'the queried cell-line';
 
   if (role === 'drug') {
+    if (isDrugDrugDisease) {
+      return persistenceCount >= 2
+        ? `Which claims most directly undercut the ${drug} disease-alignment story for ${disease}, and do they outweigh the current positive case?`
+        : `What evidence most directly argues against a meaningful disease link between ${drug} and ${disease}?`;
+    }
     return persistenceCount >= 2
       ? `Which claims most directly undercut the ${drug}-${protein} mechanism for ${disease}, and do they outweigh the current positive case?`
       : `What evidence most directly argues against a meaningful link between ${drug} and ${protein}?`;
@@ -406,6 +438,11 @@ function createRoleContradictionQuestion(
     return persistenceCount >= 2
       ? `Which findings actively argue against ${cellline} as a response context for the queried drug set?`
       : `What evidence most directly argues against ${cellline} as a meaningful response signal of the queried drug set?`;
+  }
+  if (isDrugDrugDisease) {
+    return persistenceCount >= 2
+      ? `Which disease-side findings actively argue against ${drug} as relevant to ${disease}?`
+      : `What evidence most directly argues against ${disease} supporting ${drug} as disease-relevant?`;
   }
   return persistenceCount >= 2
     ? `Which disease-side findings actively argue against ${protein} as a relevant target for ${disease}?`
@@ -431,6 +468,8 @@ function createCrossAgentMismatchQuestion(
       ? `drug-drug-${sideeffect}`
       : sample.relationshipType === 'drug_drug_cell-line'
         ? `drug-drug-${cellline}`
+        : sample.relationshipType === 'drug_drug_disease'
+          ? `drug-drug-${disease}`
         : `${drug}-${protein}-${disease}`;
 
   if (persistenceCount >= 3) {

@@ -19,6 +19,9 @@ function hyperedgeLabel(relationshipType: string): string {
   if (relationshipType === 'drug_drug_cell-line') {
     return 'drug-drug-cell-line hyperedge';
   }
+  if (relationshipType === 'drug_drug_disease') {
+    return 'drug-drug-disease hyperedge';
+  }
   if (relationshipType === 'drug_protein_disease') {
     return 'drug-protein-disease hyperedge';
   }
