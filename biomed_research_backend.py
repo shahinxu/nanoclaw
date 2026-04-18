@@ -174,7 +174,51 @@ def _default_first_person_claim(role: str, label: int) -> str:
     role_label = _expert_role_label(role)
     if label == 1:
         return f'I currently vote 1 because the {role_label}-side evidence and biological reasoning still support the queried triplet.'
-    return f'I currently vote 0 because the {role_label}-side evidence and biological reasoning do not convincingly support the queried triplet.'
+    return f'I currently vote {label} because the {role_label}-side evidence and biological reasoning do not convincingly support the queried triplet.'
+
+
+# Valid labels for multi-class relationship types (e.g. drug_drug_cell-line)
+_MULTICLASS_VALID_LABELS = {-1, 0, 1, 2}
+
+# Maps text synonyms to integer labels
+_LABEL_SYNONYMS: Dict[str, int] = {
+    '-1': -1, 'negative': -1, 'no_relation': -1, 'none': -1,
+    '0': 0, 'antagonism': 0, 'antagonistic': 0, 'contraindication': 0,
+    '1': 1, 'additive': 1, 'yes': 1, 'true': 1, 'positive': 1, 'support': 1, 'supports': 1, 'indication': 1,
+    '2': 2, 'synergy': 2, 'synergistic': 2,
+}
+
+
+def _parse_label(raw_value: Any, relationship_type: str = '') -> int:
+    """Parse a label value, supporting multi-class (-1,0,1,2) for drug_drug_cell-line
+    and binary (0,1) for other relationship types."""
+    is_multiclass = 'cell-line' in relationship_type or 'cell_line' in relationship_type
+
+    # Try integer parse first
+    try:
+        iv = int(raw_value)
+        if is_multiclass and iv in _MULTICLASS_VALID_LABELS:
+            return iv
+        # For binary types, clamp to 0/1
+        return 1 if iv == 1 else 0
+    except (TypeError, ValueError):
+        pass
+
+    # Fall back to text synonym lookup
+    lv = str(raw_value or '').strip().lower()
+    if lv in _LABEL_SYNONYMS:
+        candidate = _LABEL_SYNONYMS[lv]
+        if is_multiclass:
+            return candidate
+        return 1 if candidate >= 1 else 0
+
+    # Default
+    return 0
+
+
+def _label_to_stance(label: int) -> str:
+    """Map a label to stance. For multi-class: 1,2 → supports; -1,0 → contradicts."""
+    return 'supports' if label >= 1 else 'contradicts'
 
 
 def _ensure_first_person_claim(claim: Any, role: str, label: int) -> str:
@@ -183,7 +227,7 @@ def _ensure_first_person_claim(claim: Any, role: str, label: int) -> str:
         return _default_first_person_claim(role, label)
     if re.match(r'(?i)^i\b', cleaned):
         return cleaned
-    return f"{'I currently vote 1 because' if label == 1 else 'I currently vote 0 because'} {cleaned}"
+    return f"I currently vote {label} because {cleaned}"
 
 
 def _build_targeted_review_summary(review_context: Dict[str, Any], notes: List[str]) -> str:
@@ -444,40 +488,32 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     graph_structured = arguments.get('graph_structured')
     relationship_type = str(arguments.get('relationship_type') or '').strip()
 
-    if relationship_type == 'drug_drug_sideeffect':
-        hyperedge_label = 'drug-drug-sideeffect hyperedge'
-    elif relationship_type == 'drug_drug_cell-line':
-        hyperedge_label = 'drug-drug-cell-line hyperedge'
-    elif relationship_type == 'drug_drug_disease':
-        hyperedge_label = 'drug-drug-disease hyperedge'
-    elif relationship_type:
-        hyperedge_label = f'{relationship_type} hyperedge'
-    else:
-        hyperedge_label = 'drug-protein-disease hyperedge'
+    from prompts import get_prompt_config
+    from prompts.common import GRAPH_REASONER_SYSTEM, GRAPH_REASONER_INSTRUCTIONS
+    pcfg = get_prompt_config(relationship_type)
+
+    is_multiclass = pcfg['is_multiclass']
+    hyperedge_label = pcfg['graph_hyperedge_label']
+    label_desc = pcfg['label_desc']
+    label_schema = pcfg['label_schema']
+
+    instructions = [i.format(hyperedge_label=hyperedge_label, label_desc=label_desc)
+                    for i in GRAPH_REASONER_INSTRUCTIONS]
+    instructions.extend(pcfg.get('extra_instructions', []))
 
     prompt_payload = {
-        'task': f'Act as the graph-side expert in the current debate and decide whether the graph evidence supports or contradicts the queried {hyperedge_label}.',
+        'task': f'Act as the graph-side expert in the current debate and decide your vote for the queried {hyperedge_label}.',
         'decision_space': {
-            'recommended_label': '0 or 1 only',
+            'recommended_label': label_desc,
             'stance': ['supports', 'contradicts'],
             'strength': ['strong', 'moderate', 'weak'],
         },
-        'instructions': [
-            'Speak as an independent graph-side expert in first person.',
-            f'Start from your own judgment of the full queried {hyperedge_label} before you lean on the shared board.',
-            f'Use the graph evidence, the shared evidence board, and your biological intuition about what the neighborhood implies for the queried {hyperedge_label}.',
-            'You are allowed to use broad, indirect, or suggestive graph structure if it forms a biologically coherent story for the query.',
-            'Absence of exact same-hyperedge recovery is informative but not an automatic reason to vote 0.',
-            'Use the shared evidence board and round objective as real debate context rather than as a checklist.',
-            'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
-            'If a shared dispute question is present, address it directly.',
-            'Do not hedge. Return one binary vote and one concise claim.',
-        ],
+        'instructions': instructions,
         'review_context': review,
         'graph_summary': graph_summary,
         'graph_structured': graph_structured,
         'response_schema': {
-            'recommended_label': '0 or 1',
+            'recommended_label': label_schema,
             'stance': 'supports or contradicts',
             'strength': 'strong, moderate, or weak',
             'claim': 'a concise first-person expert statement; if debate context exists, explicitly support or challenge another expert by role',
@@ -493,7 +529,7 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical graph debate agent. Speak like an expert in an active multi-expert discussion. Use graph structure flexibly and intelligently rather than as a rigid rule system. Your claim must be in first person, and when relevant you should refer to other experts as the drug-side, protein-side, disease-side, sideeffect-side, cellline-side, or graph-side expert. Output valid JSON only.',
+                    'content': GRAPH_REASONER_SYSTEM,
                 },
                 {
                     'role': 'user',
@@ -530,21 +566,13 @@ def _graph_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if not parsed:
         raise ValueError('graph_reasoner returned unreadable JSON content.')
 
-    label_value = parsed.get('recommended_label')
-    try:
-        label = 1 if int(label_value) == 1 else 0
-    except Exception:
-        lv = str(label_value or '').strip().lower()
-        if lv in ('1', 'yes', 'true', 'positive', 'support', 'supports'):
-            label = 1
-        else:
-            label = 0
+    label = _parse_label(parsed.get('recommended_label'), relationship_type)
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
-        stance = 'supports' if label == 1 else 'contradicts'
+        stance = _label_to_stance(label)
     strength = parsed.get('strength')
     if strength not in ('strong', 'moderate', 'weak'):
-        strength = 'moderate' if label == 1 else 'weak'
+        strength = 'moderate' if label >= 1 else 'weak'
     claim = _ensure_first_person_claim(parsed.get('claim'), 'graph', label)
 
     return {
@@ -575,44 +603,42 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(entity_context, dict):
         relationship_type = str(entity_context.get('relationshipType') or '').strip()
 
-    # Build dynamic task description based on relationship type / role.
-    if relationship_type == 'drug_drug_sideeffect' or role == 'sideeffect':
-        hyperedge_label = 'drug-set-sideeffect hyperedge (does the queried drug set, considered jointly, support the queried adverse effect / side effect?)'
-    elif relationship_type == 'drug_drug_cell-line' or role == 'cellline':
-        hyperedge_label = 'drug-set-cell-line hyperedge (does the queried drug set, considered jointly, support a relevant response in the queried cell line?)'
-    elif relationship_type == 'drug_drug_disease':
-        hyperedge_label = 'drug-set-disease hyperedge (does the queried drug set, considered jointly, support meaningful disease-relevant efficacy in the queried disease context?)'
+    # Resolve prompt config — role-based override for sideeffect / cellline agents
+    from prompts import get_prompt_config
+    from prompts.common import BIOMEDICAL_EXPERT_SYSTEM, BIOMEDICAL_EXPERT_INSTRUCTIONS
+    if role == 'sideeffect' and not relationship_type:
+        pcfg = get_prompt_config('drug_drug_sideeffect')
+    elif role == 'cellline' and not relationship_type:
+        pcfg = get_prompt_config('drug_drug_cell-line')
     else:
-        hyperedge_label = 'drug-protein-disease triplet (does the queried drug act on the queried protein in the context of the queried disease?)'
+        pcfg = get_prompt_config(relationship_type)
+
+    is_multiclass = pcfg['is_multiclass']
+    hyperedge_label = pcfg['expert_hyperedge_label']
+    hyperedge_short = hyperedge_label.split('(')[0].strip()
+    label_desc = pcfg['label_desc']
+    label_schema = pcfg['label_schema']
+    vote_instruction = pcfg['vote_instruction']
+
+    instructions = [i.format(hyperedge_short=hyperedge_short, label_desc=label_desc,
+                             vote_instruction=vote_instruction)
+                    for i in BIOMEDICAL_EXPERT_INSTRUCTIONS]
+    instructions.extend(pcfg.get('extra_instructions', []))
 
     prompt_payload = {
-        'task': f'Act as the {role}-side expert in the current debate and decide whether you should vote 1 or 0 on the queried {hyperedge_label}.',
+        'task': f'Act as the {role}-side expert in the current debate and decide your vote on the queried {hyperedge_label}.',
         'decision_space': {
-            'recommended_label': '0 or 1 only',
+            'recommended_label': label_desc,
             'stance': ['supports', 'contradicts'],
             'strength': ['strong', 'moderate', 'weak'],
         },
-        'instructions': [
-            'Speak as an independent expert in first person.',
-            f'Start by judging the whole queried {hyperedge_label.split("(")[0].strip()}, not just one local fragment of evidence.',
-            'Start from the local node context when it is available. Treat it as the primary grounding source for entity identity, aliases, and baseline biology before weighing external API evidence.',
-            'Use your biomedical knowledge and reasoning as fully as possible, together with the retrieved evidence.',
-            'There is no requirement that supporting evidence be direct, explicit, non-generic, or fully complete before you can vote 1.',
-            f'Broad physiology, pharmacology, adverse-effect mechanism, target-class knowledge, alias resolution, and mechanistic analogy are all valid forms of support if they make biological sense for the queried {hyperedge_label.split("(")[0].strip()}.',
-            'Absence of an exact string match or an explicitly named direct interaction is not by itself a reason to vote 0.',
-            'Weigh retrieved evidence, shared debate context, and your own biological judgment together, then decide which side is more convincing overall.',
-            'If peer debate context is present, explicitly agree with or push back on another expert by role in your claim.',
-            'If a shared dispute question is present, address it directly.',
-            'Only vote 0 when the total biological story is genuinely unconvincing, contradictory, or better explained by another mechanism.',
-            'Separate retrieved evidence from your knowledge-based inference in the JSON fields so the reasoning remains auditable.',
-            'Return one binary vote and one concise claim only.',
-        ],
+        'instructions': instructions,
         'review_context': review,
         'entity_context': entity_context,
         'evidence_summary': evidence_summary,
         'evidence_structured': evidence_structured,
         'response_schema': {
-            'recommended_label': '0 or 1',
+            'recommended_label': label_schema,
             'stance': 'supports or contradicts',
             'strength': 'strong, moderate, or weak',
             'claim': 'a concise first-person expert statement integrating retrieved evidence and biomedical reasoning; if debate context exists, explicitly support or challenge another expert by role',
@@ -630,7 +656,7 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a biomedical expert debate agent. Your job is to reason like a strong biologist or pharmacologist in an active multi-expert discussion, not like a rigid rule checker. Speak in first person. When relevant, refer to peers as the drug-side, protein-side, disease-side, sideeffect-side, cellline-side, or graph-side expert and explicitly agree or disagree with them. Use retrieved evidence plus your own biological knowledge freely, while distinguishing explicit evidence from your own inference. Output valid JSON only.',
+                    'content': BIOMEDICAL_EXPERT_SYSTEM,
                 },
                 {
                     'role': 'user',
@@ -667,21 +693,13 @@ def _biomedical_expert_reasoner(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if not parsed:
         raise ValueError('biomedical_expert_reasoner returned unreadable JSON content.')
 
-    label_value = parsed.get('recommended_label')
-    try:
-        label = 1 if int(label_value) == 1 else 0
-    except Exception:
-        lv = str(label_value or '').strip().lower()
-        if lv in ('1', 'yes', 'true', 'positive', 'support', 'supports'):
-            label = 1
-        else:
-            label = 0
+    label = _parse_label(parsed.get('recommended_label'), relationship_type)
     stance = parsed.get('stance')
     if stance not in ('supports', 'contradicts'):
-        stance = 'supports' if label == 1 else 'contradicts'
+        stance = _label_to_stance(label)
     strength = parsed.get('strength')
     if strength not in ('strong', 'moderate', 'weak'):
-        strength = 'moderate' if label == 1 else 'weak'
+        strength = 'moderate' if label >= 1 else 'weak'
     claim = _ensure_first_person_claim(parsed.get('claim'), role, label)
     retrieved_basis = parsed.get('retrieved_evidence_basis')
     if not isinstance(retrieved_basis, list):
@@ -2029,6 +2047,273 @@ def _sideeffect_researcher(
     }
 
 
+# ---------------------------------------------------------------------------
+# Autonomous Researcher — ReAct-style agentic loop
+# ---------------------------------------------------------------------------
+
+_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    'drug_researcher': {
+        'description': 'Look up a drug by DrugBank ID. Returns mechanism of action, approved indications, clinical phase, and safety flags from ChEMBL.',
+        'parameters': {
+            'drugbank_id': 'A DrugBank accession such as DB00001.',
+        },
+    },
+    'protein_researcher': {
+        'description': 'Look up a protein by gene symbol. Returns function description, GO biological processes, subcellular localisation, and Reactome pathways from UniProt.',
+        'parameters': {
+            'gene_symbol': 'An NCBI gene symbol such as EGFR or TP53.',
+        },
+    },
+    'disease_researcher': {
+        'description': 'Look up a disease by MONDO ID. Returns disease name, definition, associated targets with scores, and known drugs from Open Targets.',
+        'parameters': {
+            'mondo_id': 'A MONDO identifier such as MONDO:0005044.',
+        },
+    },
+    'sideeffect_researcher': {
+        'description': 'Look up a side effect by UMLS CUI. Returns side-effect name, description, and top reporting drugs from OpenFDA.',
+        'parameters': {
+            'cui': 'A UMLS Concept Unique Identifier such as C0020538.',
+        },
+    },
+}
+
+
+def _execute_tool_for_react(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    workspace_root: Optional[str],
+) -> str:
+    """Execute a researcher tool and return a text summary for the ReAct loop."""
+    try:
+        if tool_name == 'drug_researcher':
+            result = _drug_researcher(tool_args.get('drugbank_id'), None, workspace_root)
+        elif tool_name == 'protein_researcher':
+            result = _protein_researcher(tool_args.get('gene_symbol'), None)
+        elif tool_name == 'disease_researcher':
+            result = _disease_researcher(tool_args.get('mondo_id'), None)
+        elif tool_name == 'sideeffect_researcher':
+            result = _sideeffect_researcher(
+                tool_args.get('cui'), tool_args.get('drug_ids'), None, workspace_root,
+            )
+        else:
+            return f'Error: unknown tool "{tool_name}".'
+
+        summary = str(result.get('text_summary') or '').strip()
+        structured = result.get('structured')
+        if structured and isinstance(structured, dict):
+            # Build a compact but rich text representation the LLM can reason over
+            compact = json.dumps(structured, ensure_ascii=False, indent=1, default=str)
+            # Truncate very large outputs to stay within context window
+            if len(compact) > 6000:
+                compact = compact[:6000] + '\n... (truncated)'
+            return f'{summary}\n\nStructured data:\n{compact}'
+        return summary or '(tool returned no data)'
+    except Exception as exc:
+        return f'Error calling {tool_name}: {exc}'
+
+
+def _autonomous_researcher(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """ReAct-style autonomous researcher: the LLM decides which tools to call."""
+    api_key = _read_text_file(arguments.get('openrouter_api_key_path'))
+    base_url = str(arguments.get('openrouter_base_url') or 'http://localhost:8000/v1').rstrip('/')
+    model = str(arguments.get('openrouter_model') or DEFAULT_OPENROUTER_MODEL).strip()
+    if not api_key:
+        api_key = 'local'
+    role = str(arguments.get('role') or 'biomedical').strip().lower() or 'biomedical'
+    available_tools = arguments.get('available_tools') or []
+    if not isinstance(available_tools, list):
+        available_tools = [str(available_tools)]
+    entity_context = arguments.get('entity_context') or {}
+    shared_node_context = arguments.get('shared_node_context') or ''
+    review_context = _normalize_review_context(arguments.get('review_context'))
+    workspace_root = arguments.get('workspace_root')
+
+    relationship_type = ''
+    if isinstance(entity_context, dict):
+        relationship_type = str(entity_context.get('relationshipType') or '').strip()
+
+    # Resolve prompt config — role-based override for sideeffect / cellline agents
+    from prompts import get_prompt_config
+    from prompts.common import AUTONOMOUS_RESEARCHER_SYSTEM
+    if role == 'sideeffect' and not relationship_type:
+        pcfg = get_prompt_config('drug_drug_sideeffect')
+    elif role == 'cellline' and not relationship_type:
+        pcfg = get_prompt_config('drug_drug_cell-line')
+    else:
+        pcfg = get_prompt_config(relationship_type)
+
+    is_multiclass = pcfg['is_multiclass']
+    hyperedge_label = pcfg['expert_hyperedge_label']
+    label_instruction = pcfg['researcher_label_instruction']
+    extra = pcfg.get('extra_instructions', [])
+    if extra:
+        label_instruction = label_instruction + '\n' + '\n'.join(f'- {e}' for e in extra)
+    final_answer_schema = pcfg['researcher_final_answer_schema']
+    task_line = pcfg['researcher_task_line']
+
+    # Build tool descriptions for the prompt
+    tool_desc_lines = []
+    for t_name in available_tools:
+        schema = _TOOL_SCHEMAS.get(t_name)
+        if schema:
+            params = ', '.join(f'{k}: {v}' for k, v in schema['parameters'].items())
+            tool_desc_lines.append(f'  - {t_name}({params}): {schema["description"]}')
+
+    tool_block = '\n'.join(tool_desc_lines) if tool_desc_lines else '  (no external tools available)'
+
+    system_prompt = AUTONOMOUS_RESEARCHER_SYSTEM.format(
+        role=role,
+        label_instruction=label_instruction,
+        tool_block=tool_block,
+        final_answer_schema=final_answer_schema,
+    )
+
+    # Build the initial user message
+    user_parts = []
+    user_parts.append(task_line)
+    if entity_context:
+        user_parts.append(f'\n## Entity context\n{json.dumps(entity_context, ensure_ascii=False, indent=1, default=str)}')
+    if shared_node_context:
+        if isinstance(shared_node_context, dict):
+            user_parts.append(f'\n## Shared node descriptions\n{json.dumps(shared_node_context, ensure_ascii=False, indent=1, default=str)}')
+        else:
+            user_parts.append(f'\n## Shared node descriptions\n{shared_node_context}')
+    if review_context:
+        user_parts.append(f'\n## Debate context\n{json.dumps(review_context, ensure_ascii=False, indent=1, default=str)}')
+    user_parts.append('\nBegin your investigation. Start with THINK, then decide whether to call a tool or give your FINAL_ANSWER.')
+
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': '\n'.join(user_parts)},
+    ]
+
+    max_steps = 6  # 5 tool calls + 1 final answer
+    all_observations: List[Dict[str, Any]] = []
+
+    for step in range(max_steps):
+        response = _http_post(
+            f'{base_url}/chat/completions',
+            json_payload={
+                'model': model,
+                'temperature': 0,
+                'max_tokens': 2048,
+                'messages': messages,
+            },
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+            },
+            timeout=60,
+        )
+
+        if not response.ok:
+            raise ValueError(
+                f'autonomous_researcher LLM call failed with status {response.status_code} at step {step}.'
+            )
+
+        try:
+            payload = response.json()
+        except Exception:
+            raise ValueError('autonomous_researcher LLM returned non-JSON response.')
+
+        content = ''
+        if isinstance(payload, dict):
+            choices = payload.get('choices') or []
+            if isinstance(choices, list) and choices:
+                message = choices[0].get('message') if isinstance(choices[0], dict) else None
+                if isinstance(message, dict):
+                    content = str(message.get('content') or '')
+
+        if not content.strip():
+            raise ValueError(f'autonomous_researcher LLM returned empty content at step {step}.')
+
+        messages.append({'role': 'assistant', 'content': content})
+
+        # Check for FINAL_ANSWER
+        final_match = re.search(r'FINAL_ANSWER\s*:\s*(\{.*\})', content, re.DOTALL)
+        if final_match:
+            parsed = _parse_json_object(final_match.group(1))
+            if parsed:
+                return _format_researcher_result(parsed, role, model, all_observations, relationship_type)
+            # Try parsing the whole content
+            parsed = _parse_json_object(content)
+            if parsed and 'recommended_label' in parsed:
+                return _format_researcher_result(parsed, role, model, all_observations, relationship_type)
+            raise ValueError('autonomous_researcher FINAL_ANSWER contained invalid JSON.')
+
+        # Check for ACTION
+        action_match = re.search(r'ACTION\s*:\s*(\w+)\s*\(\s*(\{.*?\})\s*\)', content, re.DOTALL)
+        if action_match:
+            tool_name = action_match.group(1).strip()
+            try:
+                tool_args = json.loads(action_match.group(2))
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            if tool_name not in available_tools:
+                observation = f'Error: tool "{tool_name}" is not available. Available tools: {", ".join(available_tools)}'
+            else:
+                observation = _execute_tool_for_react(tool_name, tool_args, workspace_root)
+
+            all_observations.append({
+                'step': step,
+                'tool': tool_name,
+                'args': tool_args,
+                'observation_length': len(observation),
+            })
+            messages.append({'role': 'user', 'content': f'OBSERVATION:\n{observation}\n\nContinue your investigation. THINK about what this tells you, then call another tool or give your FINAL_ANSWER.'})
+            continue
+
+        # No ACTION and no FINAL_ANSWER — try to extract JSON from the text
+        parsed = _parse_json_object(content)
+        if parsed and 'recommended_label' in parsed:
+            return _format_researcher_result(parsed, role, model, all_observations, relationship_type)
+
+        # Nudge the model to produce a final answer
+        messages.append({'role': 'user', 'content': 'You must now give your FINAL_ANSWER as JSON. No more tool calls.'})
+
+    # Exhausted all steps — force parse last response
+    last_content = messages[-1].get('content', '') if messages else ''
+    parsed = _parse_json_object(last_content)
+    if parsed and 'recommended_label' in parsed:
+        return _format_researcher_result(parsed, role, model, all_observations, relationship_type)
+
+    raise ValueError('autonomous_researcher exhausted all steps without producing a valid FINAL_ANSWER.')
+
+
+def _format_researcher_result(
+    parsed: Dict[str, Any],
+    role: str,
+    model: str,
+    observations: List[Dict[str, Any]],
+    relationship_type: str = '',
+) -> Dict[str, Any]:
+    """Format the final parsed JSON into the standard result structure."""
+    label = _parse_label(parsed.get('recommended_label'), relationship_type)
+
+    stance = parsed.get('stance')
+    if stance not in ('supports', 'contradicts'):
+        stance = _label_to_stance(label)
+    strength = parsed.get('strength')
+    if strength not in ('strong', 'moderate', 'weak'):
+        strength = 'moderate' if label >= 1 else 'weak'
+    claim = _ensure_first_person_claim(parsed.get('claim'), role, label)
+
+    return {
+        'text_summary': f'[autonomous_researcher] {role.capitalize()}-side expert vote {label}: {claim}',
+        'structured': {
+            'recommended_label': label,
+            'stance': stance,
+            'strength': strength,
+            'claim': claim,
+            'model': model,
+            'role': role,
+            'tool_calls': observations,
+        },
+    }
+
+
 def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     review_context = arguments.get('review_context')
     if name == 'drug_researcher':
@@ -2058,4 +2343,6 @@ def call_research_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return _round_objective_planner(arguments)
     if name == 'graph_reasoner':
         return _graph_reasoner(arguments)
+    if name == 'autonomous_researcher':
+        return _autonomous_researcher(arguments)
     raise ValueError(f'Unsupported research tool: {name}')

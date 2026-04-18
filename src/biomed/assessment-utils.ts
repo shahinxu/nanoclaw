@@ -1,4 +1,23 @@
-import { AgentAssessment, AgentRoundContext, EvidenceItem } from './types.js';
+import { AgentAssessment, AgentRoundContext, BiomedLabel, EvidenceItem } from './types.js';
+
+const VALID_LABELS: ReadonlySet<number> = new Set([-1, 0, 1, 2]);
+
+/** Parse a recommended_label from the Python result, supporting multiclass. */
+export function parseLabelFromRaw(raw: unknown): BiomedLabel {
+  if (typeof raw === 'number' && VALID_LABELS.has(raw)) {
+    return raw as BiomedLabel;
+  }
+  const n = Number(raw);
+  if (!Number.isNaN(n) && VALID_LABELS.has(n)) {
+    return n as BiomedLabel;
+  }
+  return 0;
+}
+
+/** Map a label to stance. Labels >= 1 are 'supports', others 'contradicts'. */
+export function labelToStance(label: BiomedLabel): 'supports' | 'contradicts' {
+  return label >= 1 ? 'supports' : 'contradicts';
+}
 
 export function normalizeText(value: string): string {
   return value
@@ -34,7 +53,7 @@ export function parseStructuredReasonerOutput(
   stance: EvidenceItem['stance'];
   strength: EvidenceItem['strength'];
   claim: string;
-  recommendedLabel: 0 | 1;
+  recommendedLabel: BiomedLabel;
 } | null {
   if (!structured) {
     return null;
@@ -47,13 +66,13 @@ export function parseStructuredReasonerOutput(
     (stance === 'supports' || stance === 'contradicts') &&
     (strength === 'strong' || strength === 'moderate' || strength === 'weak') &&
     typeof claim === 'string' &&
-    (recommendedLabel === 0 || recommendedLabel === 1)
+    (recommendedLabel === -1 || recommendedLabel === 0 || recommendedLabel === 1 || recommendedLabel === 2)
   ) {
     return {
       stance,
       strength,
       claim,
-      recommendedLabel,
+      recommendedLabel: recommendedLabel as BiomedLabel,
     };
   }
   return null;

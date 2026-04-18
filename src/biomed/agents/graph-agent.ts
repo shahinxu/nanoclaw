@@ -6,11 +6,16 @@ import {
   EvidenceItem,
   HypothesisRecord,
   PlannerAction,
+  ResearchToolAdapter,
 } from '../types.js';
 import { getEntityIds } from '../entity-utils.js';
 import { executePlannerAction } from '../plan-executor.js';
 import { formatSharedNodeBundle } from '../shared-node-context.js';
-import { LocalGraphTool } from '../tools/local-graph-tool.js';
+import { parseStructuredReasonerOutput, parseLabelFromRaw, labelToStance } from '../assessment-utils.js';
+import {
+  InformativeHyperedgeCandidate,
+  LocalGraphTool,
+} from '../tools/local-graph-tool.js';
 
 function hyperedgeLabel(relationshipType: string): string {
   if (relationshipType === 'drug_drug_sideeffect') {
@@ -22,95 +27,140 @@ function hyperedgeLabel(relationshipType: string): string {
   if (relationshipType === 'drug_drug_disease') {
     return 'drug-drug-disease hyperedge';
   }
+  if (relationshipType === 'drug_disease') {
+    return 'drug-disease indication/contraindication edge';
+  }
   if (relationshipType === 'drug_protein_disease') {
     return 'drug-protein-disease hyperedge';
   }
   return `${relationshipType} hyperedge`;
 }
 
-function decideFromNeighborhood(neighborhoodStats: {
-  totalNeighbors: number;
-  positiveNeighbors: number;
-  negativeNeighbors: number;
-  positiveRate: number;
-  sameRelationshipNeighbors: number;
-  sameRelationshipPositive: number;
-  sameRelationshipNegative: number;
-}): {
-  recommendedLabel: 0 | 1;
-  stance: 'supports' | 'contradicts';
-  strength: 'strong' | 'moderate' | 'weak';
-  claim: string;
-} {
-  const {
-    totalNeighbors,
-    positiveNeighbors,
-    negativeNeighbors,
-    positiveRate,
-    sameRelationshipNeighbors,
-    sameRelationshipPositive,
-    sameRelationshipNegative,
-  } = neighborhoodStats;
+// ---------------------------------------------------------------------------
+// Build a rich, human-readable narrative from graph neighbourhood data so the
+// LLM can reason over it the way a human researcher would browse a knowledge
+// graph — going beyond simple positive-rate thresholds.
+// ---------------------------------------------------------------------------
+function buildGraphNarrative(
+  queryEntities: string[],
+  relationshipType: string,
+  stats: {
+    totalNeighbors: number;
+    positiveNeighbors: number;
+    negativeNeighbors: number;
+    positiveRate: number;
+    sameRelationshipNeighbors: number;
+    sameRelationshipPositive: number;
+    sameRelationshipNegative: number;
+  },
+  relationshipBreakdown:
+    | Record<string, { total?: number; positive?: number; negative?: number }>
+    | undefined,
+  topNeighbors: InformativeHyperedgeCandidate[],
+): string {
+  const lines: string[] = [];
 
-  if (totalNeighbors === 0) {
-    return {
-      recommendedLabel: 0,
-      stance: 'contradicts',
-      strength: 'weak',
-      claim:
-        'I vote 0 because the graph index returned no neighboring hyperedges sharing entities with the query, so there is no local graph signal to support this relation.',
-    };
+  lines.push(
+    '## Neighbourhood overview',
+    `Query entities: ${queryEntities.join(', ')}`,
+    `Query relationship type: ${relationshipType}`,
+    `Total neighbouring hyperedges sharing ≥1 entity: ${stats.totalNeighbors}`,
+    `  Positive (label=1): ${stats.positiveNeighbors}  |  Negative (label=0): ${stats.negativeNeighbors}  |  Positive rate: ${(stats.positiveRate * 100).toFixed(1)}%`,
+    `Same-relationship neighbours: ${stats.sameRelationshipNeighbors} (positive=${stats.sameRelationshipPositive}, negative=${stats.sameRelationshipNegative})`,
+  );
+
+  if (relationshipBreakdown && Object.keys(relationshipBreakdown).length > 0) {
+    lines.push('', '## Relationship-type breakdown of neighbours');
+    for (const [rel, counts] of Object.entries(relationshipBreakdown)) {
+      const total = counts.total ?? 0;
+      const pos = counts.positive ?? 0;
+      const neg = counts.negative ?? 0;
+      const rate = total > 0 ? ((pos / total) * 100).toFixed(1) : '0.0';
+      lines.push(
+        `  ${rel}: ${total} edges (${pos} positive, ${neg} negative, ${rate}% positive)`,
+      );
+    }
   }
 
-  if (
-    sameRelationshipNeighbors >= 5 &&
-    sameRelationshipPositive > sameRelationshipNegative
-  ) {
-    return {
-      recommendedLabel: 1,
-      stance: 'supports',
-      strength: 'strong',
-      claim: `I vote 1 because same-relationship neighbors are sufficiently dense and positive (${sameRelationshipPositive}/${sameRelationshipNeighbors}), which is strong local graph support for the queried relation pattern.`,
-    };
+  if (topNeighbors.length > 0) {
+    lines.push('', '## Most informative neighbouring hyperedges');
+    for (const [i, n] of topNeighbors.entries()) {
+      const labelStr = n.label === 1 ? 'POSITIVE' : 'NEGATIVE';
+      const sameRel = n.sameRelationship ? ' [same-relationship]' : '';
+      lines.push(
+        `  ${i + 1}. ${n.relationship}(${n.entities.join(', ')})  label=${labelStr}${sameRel}`,
+        `     Shared entities with query: ${n.sharedEntities.join(', ')} (${n.sharedCount} shared)  score=${n.score}`,
+      );
+    }
   }
 
-  if (positiveRate >= 0.6 && positiveNeighbors >= 20) {
-    return {
-      recommendedLabel: 1,
-      stance: 'supports',
-      strength: 'moderate',
-      claim: `I vote 1 because the neighborhood is overall positive (${positiveNeighbors}/${totalNeighbors}, positive rate ${positiveRate.toFixed(3)}), which supports this hyperedge being consistent with nearby labeled graph evidence.`,
-    };
+  if (topNeighbors.length > 0) {
+    lines.push('', '## Patterns to consider');
+
+    // Entity co-occurrence patterns
+    const entityAppearances = new Map<string, { pos: number; neg: number }>();
+    for (const n of topNeighbors) {
+      for (const e of n.entities) {
+        const counts = entityAppearances.get(e) ?? { pos: 0, neg: 0 };
+        if (n.label === 1) counts.pos += 1;
+        else counts.neg += 1;
+        entityAppearances.set(e, counts);
+      }
+    }
+    const frequentEntities = [...entityAppearances.entries()]
+      .filter(([, c]) => c.pos + c.neg >= 2)
+      .sort(([, a], [, b]) => b.pos + b.neg - (a.pos + a.neg))
+      .slice(0, 10);
+    if (frequentEntities.length > 0) {
+      lines.push('  Frequently co-occurring entities in neighbourhood:');
+      for (const [entity, counts] of frequentEntities) {
+        const isQuery = queryEntities.includes(entity)
+          ? ' (query entity)'
+          : '';
+        lines.push(
+          `    ${entity}${isQuery}: appears in ${counts.pos} positive + ${counts.neg} negative edges`,
+        );
+      }
+    }
+
+    // Same-relationship neighbor details
+    const sameRelNeighbors = topNeighbors.filter((n) => n.sameRelationship);
+    if (sameRelNeighbors.length > 0) {
+      lines.push('  Same-relationship neighbours detail:');
+      for (const n of sameRelNeighbors) {
+        const nonShared = n.entities.filter(
+          (e) => !n.sharedEntities.includes(e),
+        );
+        lines.push(
+          `    ${n.entities.join(' + ')} → label=${n.label}  (non-shared: ${nonShared.join(', ') || 'none'})`,
+        );
+      }
+    }
+
+    // Cross-relationship signals
+    const crossRelNeighbors = topNeighbors.filter((n) => !n.sameRelationship);
+    if (crossRelNeighbors.length > 0) {
+      lines.push(
+        '  Cross-relationship signals (different relationship types sharing query entities):',
+      );
+      for (const n of crossRelNeighbors.slice(0, 5)) {
+        lines.push(
+          `    ${n.relationship}(${n.entities.join(', ')}) → label=${n.label}  shared=[${n.sharedEntities.join(', ')}]`,
+        );
+      }
+    }
   }
 
-  if (
-    sameRelationshipNeighbors >= 3 &&
-    sameRelationshipPositive > sameRelationshipNegative &&
-    positiveRate >= 0.5
-  ) {
-    return {
-      recommendedLabel: 1,
-      stance: 'supports',
-      strength: 'weak',
-      claim: `I vote 1 because same-relationship neighbors are slightly positive (${sameRelationshipPositive}/${sameRelationshipNeighbors}) and the overall neighborhood does not contradict that direction.`,
-    };
-  }
-
-  const strongNegative =
-    sameRelationshipNeighbors >= 5 &&
-    sameRelationshipNegative >= sameRelationshipPositive + 2;
-  return {
-    recommendedLabel: 0,
-    stance: 'contradicts',
-    strength: strongNegative ? 'strong' : 'moderate',
-    claim: `I vote 0 because neighboring labeled hyperedges do not support the queried relation strongly enough (overall ${positiveNeighbors}/${totalNeighbors} positive, same-relationship ${sameRelationshipPositive}/${sameRelationshipNeighbors}), so the local graph evidence remains negative.`,
-  };
+  return lines.join('\n');
 }
 
 export class GraphAgent {
   readonly agentId = 'graph_agent';
 
-  constructor(private readonly localGraphTool: LocalGraphTool) {}
+  constructor(
+    private readonly localGraphTool: LocalGraphTool,
+    private readonly toolAdapter: ResearchToolAdapter,
+  ) {}
 
   async assess(
     sample: BiomedTaskSample,
@@ -126,8 +176,9 @@ export class GraphAgent {
       'sideeffect',
       'cellline',
     );
-    const label = hyperedgeLabel(sample.relationshipType);
+    const heLabel = hyperedgeLabel(sample.relationshipType);
 
+    // ── Step 1: Retrieve neighbourhood from local graph tool ────────────
     const plannerAction: PlannerAction = {
       hypothesisId: hypotheses[0]?.id ?? `H-positive-${sample.sampleIndex}`,
       hypothesisStatement:
@@ -136,10 +187,10 @@ export class GraphAgent {
         'The queried relationship exists.',
       verificationGoal:
         roundContext && roundContext.hypothesisFocus.length > 0
-          ? `First read the shared node input for the full hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire ${label}. After that, inspect labeled neighboring hyperedges and decide whether local graph evidence supports or contradicts ${roundContext.hypothesisFocus.join(' | ')}.`
+          ? `First read the shared node input for the full hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then form or update a provisional 0/1 prediction for the entire ${heLabel}. After that, inspect labeled neighboring hyperedges and decide whether local graph evidence supports or contradicts ${roundContext.hypothesisFocus.join(' | ')}.`
           : roundContext && roundContext.focus.length > 0
             ? `First read the shared node input for the full hyperedge (${formatSharedNodeBundle(roundContext.sharedNodeContext)}), then inspect labeled neighboring hyperedges and use them to answer ${roundContext.focus.join(' | ')} before ending with a binary vote.`
-            : `Inspect labeled neighboring hyperedges around the queried entities and decide whether the ${label} is supported or contradicted by local graph evidence.`,
+            : `Inspect labeled neighboring hyperedges around the queried entities and decide whether the ${heLabel} is supported or contradicted by local graph evidence.`,
       expectedEvidence: [
         'shared node descriptions for queried entities as grounding',
         'neighboring hyperedges sharing at least one query entity',
@@ -157,7 +208,7 @@ export class GraphAgent {
             roundNumber: roundContext?.roundNumber ?? 1,
             focus: roundContext?.focus ?? [],
             hypothesisFocus: roundContext?.hypothesisFocus ?? [],
-            maxCandidates: 8,
+            maxCandidates: 15,
           },
         },
       ],
@@ -189,15 +240,7 @@ export class GraphAgent {
         string,
         { total?: number; positive?: number; negative?: number }
       >;
-      topNeighbors?: Array<{
-        relationship?: string;
-        entities?: string[];
-        label?: 0 | 1;
-        sharedEntities?: string[];
-        sharedCount?: number;
-        sameRelationship?: boolean;
-        score?: number;
-      }>;
+      topNeighbors?: InformativeHyperedgeCandidate[];
     } | null;
 
     const stats = structured?.neighborhoodStats;
@@ -216,32 +259,103 @@ export class GraphAgent {
       );
     }
 
-    const decision = decideFromNeighborhood({
-      totalNeighbors: stats.totalNeighbors,
-      positiveNeighbors: stats.positiveNeighbors,
-      negativeNeighbors: stats.negativeNeighbors,
-      positiveRate: stats.positiveRate,
-      sameRelationshipNeighbors: stats.sameRelationshipNeighbors,
-      sameRelationshipPositive: stats.sameRelationshipPositive,
-      sameRelationshipNegative: stats.sameRelationshipNegative,
+    const topNeighbors = (structured?.topNeighbors ??
+      []) as InformativeHyperedgeCandidate[];
+
+    // ── Step 2: Build rich narrative for LLM reasoning ──────────────────
+    const graphNarrative = buildGraphNarrative(
+      queryEntityIds,
+      sample.relationshipType,
+      {
+        totalNeighbors: stats.totalNeighbors,
+        positiveNeighbors: stats.positiveNeighbors,
+        negativeNeighbors: stats.negativeNeighbors,
+        positiveRate: stats.positiveRate,
+        sameRelationshipNeighbors: stats.sameRelationshipNeighbors,
+        sameRelationshipPositive: stats.sameRelationshipPositive,
+        sameRelationshipNegative: stats.sameRelationshipNegative,
+      },
+      structured?.relationshipBreakdown,
+      topNeighbors,
+    );
+
+    // Build debate-aware review context
+    const reviewContext: Record<string, unknown> = {};
+    if (roundContext) {
+      if (roundContext.roundObjective) {
+        reviewContext.round_objective = roundContext.roundObjective;
+      }
+      if (roundContext.sharedEvidenceBoard) {
+        reviewContext.shared_evidence_board = roundContext.sharedEvidenceBoard;
+      }
+      if (roundContext.focus.length > 0) {
+        reviewContext.debate_focus = roundContext.focus;
+      }
+      if (roundContext.hypothesisFocus.length > 0) {
+        reviewContext.hypothesis_focus = roundContext.hypothesisFocus;
+      }
+    }
+
+    // ── Step 3: Call graph_reasoner LLM ─────────────────────────────────
+    const reasonerResult = await this.toolAdapter.callTool('graph_reasoner', {
+      review_context: reviewContext,
+      graph_summary: graphNarrative,
+      graph_structured: {
+        query: structured?.query,
+        neighborhoodStats: stats,
+        relationshipBreakdown: structured?.relationshipBreakdown,
+        topNeighbors,
+      },
+      relationship_type: sample.relationshipType,
     });
 
+    let recommendedLabel: -1 | 0 | 1 | 2;
+    let stance: 'supports' | 'contradicts';
+    let strength: 'strong' | 'moderate' | 'weak';
+    let claim: string;
+
+    if (reasonerResult.status !== 'ok') {
+      throw new Error(
+        `graph_reasoner LLM failed for sample ${sample.sampleIndex}: ${reasonerResult.error ?? 'unknown'}`,
+      );
+    }
+
+    const reasoned = parseStructuredReasonerOutput(reasonerResult.structured);
+    if (reasoned) {
+      recommendedLabel = reasoned.recommendedLabel;
+      stance = reasoned.stance;
+      strength = reasoned.strength;
+      claim = reasoned.claim;
+    } else {
+      // Fallback: parse from structured directly
+      const s = reasonerResult.structured as Record<string, unknown> | null;
+      recommendedLabel = parseLabelFromRaw(s?.recommended_label);
+      stance = labelToStance(recommendedLabel);
+      strength = 'moderate';
+      claim =
+        typeof s?.claim === 'string'
+          ? s.claim
+          : `Graph-side expert votes ${recommendedLabel} based on neighbourhood analysis.`;
+    }
+
+    // ── Step 4: Assemble assessment ─────────────────────────────────────
     const evidenceItems: EvidenceItem[] = [
       {
         id: `graph-neighborhood-${sample.sampleIndex}`,
         source: this.agentId,
         toolName: 'local_graph_tool',
         entityScope: queryEntityIds,
-        claim: decision.claim,
-        stance: decision.stance,
-        strength: decision.strength,
+        claim,
+        stance,
+        strength,
         structured: {
           query: structured?.query,
           neighborhoodStats: stats,
           relationshipBreakdown: structured?.relationshipBreakdown,
-          topNeighbors: structured?.topNeighbors ?? [],
-          graphSummary: result.textSummary,
-          recommended_label: decision.recommendedLabel,
+          topNeighbors,
+          graphNarrative,
+          recommended_label: recommendedLabel,
+          reasonerStructured: reasonerResult.structured,
         },
       },
     ];
@@ -254,23 +368,35 @@ export class GraphAgent {
         entityScope: queryEntityIds,
         rawToolOutput: result,
         interpretedOutput: {
-          stance: decision.stance,
-          strength: decision.strength,
-          claim: decision.claim,
+          stance,
+          strength,
+          claim,
+        },
+      },
+      {
+        id: `graph-reasoner-trace-${sample.sampleIndex}`,
+        toolName: 'graph_reasoner',
+        toolArguments: {
+          relationship_type: sample.relationshipType,
+          roundNumber: roundContext?.roundNumber ?? 1,
+        },
+        entityScope: queryEntityIds,
+        rawToolOutput: reasonerResult,
+        interpretedOutput: {
+          stance,
+          strength,
+          claim,
         },
       },
     ];
 
-    const summary =
-      decision.recommendedLabel === 1
-        ? 'Graph-side expert votes 1 for the current hypothesis in this round.'
-        : 'Graph-side expert votes 0 for the current hypothesis in this round.';
+    const summary = `Graph-side expert votes ${recommendedLabel} for the current hypothesis in this round.`;
 
     return {
       agentId: this.agentId,
       role: 'graph',
       roundNumber: roundContext?.roundNumber ?? 1,
-      recommendedLabel: decision.recommendedLabel,
+      recommendedLabel,
       summary,
       hypothesesTouched: roundContext?.activeHypothesisIds.length
         ? roundContext.activeHypothesisIds

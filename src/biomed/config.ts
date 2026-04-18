@@ -59,7 +59,7 @@ function resolveWorkspaceRoot(): string {
 
 const workspaceRoot = resolveWorkspaceRoot();
 const defaultDataDir = path.join(workspaceRoot, 'data_edge_test');
-const defaultGraphDataDir = path.join(workspaceRoot, 'data_edge_train');
+const defaultGraphDataDir = path.join(workspaceRoot, 'data_edge_test');
 const defaultApiKeyPath = path.join(workspaceRoot, 'openrouter_api_key.txt');
 
 export const DEFAULT_BIOMED_CONFIG: BiomedWorkflowConfig = {

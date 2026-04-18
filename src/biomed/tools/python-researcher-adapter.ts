@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import path from 'node:path';
 
 import { BiomedWorkflowConfig } from '../config.js';
 import { ResearchToolAdapter, ResearchToolResult } from '../types.js';
@@ -10,7 +11,7 @@ const PYTHON_TOOL_BRIDGE = `
 import json
 import sys
 
-from nanoclaw.biomed_research_backend import call_research_tool
+from biomed_research_backend import call_research_tool
 
 tool_name = sys.argv[1]
 arguments = json.loads(sys.argv[2])
@@ -38,7 +39,8 @@ export class PythonResearchToolAdapter implements ResearchToolAdapter {
         toolName === 'graph_reasoner' ||
         toolName === 'biomedical_expert_reasoner' ||
         toolName === 'hypothesis_generator' ||
-        toolName === 'round_objective_planner'
+        toolName === 'round_objective_planner' ||
+        toolName === 'autonomous_researcher'
       ) {
         runtimeArgs.openrouter_api_key_path = this.config.openRouterApiKeyPath;
         runtimeArgs.openrouter_base_url = this.config.openRouterBaseUrl;
@@ -51,7 +53,10 @@ export class PythonResearchToolAdapter implements ResearchToolAdapter {
           cwd: this.config.workspaceRoot,
           env: {
             ...process.env,
-            PYTHONPATH: this.config.workspaceRoot,
+            PYTHONPATH: [
+              path.join(this.config.workspaceRoot, 'biomed_agent'),
+              this.config.workspaceRoot,
+            ].join(':'),
           },
           maxBuffer: 10 * 1024 * 1024,
         },

@@ -4,7 +4,9 @@ import path from 'node:path';
 import { DEFAULT_BIOMED_CONFIG } from './config.js';
 import { BiomedWorkflowRunner } from './runner.js';
 import { CsvTaskLoader } from './task-loader.js';
-import type { BiomedTaskSample, WorkflowResult } from './types.js';
+import type { BiomedLabel, BiomedTaskSample, WorkflowResult } from './types.js';
+
+const MULTICLASS_TYPES = new Set<string>();
 
 interface CliOptions {
   relationshipType: string;
@@ -23,7 +25,7 @@ interface CliOptions {
   streamOutputPath?: string;
 }
 
-interface EvalMetrics {
+interface BinaryMetrics {
   total: number;
   accuracy: number;
   precision: number;
@@ -36,8 +38,31 @@ interface EvalMetrics {
   fn: number;
 }
 
+interface PerClassMetrics {
+  label: BiomedLabel;
+  count: number;
+  predicted: number;
+  correct: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+interface MulticlassMetrics {
+  total: number;
+  accuracy: number;
+  macroF1: number;
+  macroPrecision: number;
+  macroRecall: number;
+  perClass: PerClassMetrics[];
+  confusionMatrix: Record<string, Record<string, number>>;
+}
+
+type EvalMetrics = BinaryMetrics | MulticlassMetrics;
+
 interface RunningCounts {
   completed: number;
+  correct: number;
   tp: number;
   tn: number;
   fp: number;
@@ -165,25 +190,35 @@ function balancedSample(
   sampleCount: number,
   seed: number,
 ): BiomedTaskSample[] {
-  const positives = samples.filter((sample) => sample.groundTruth === 1);
-  const negatives = samples.filter((sample) => sample.groundTruth === 0);
-  const targetPerLabel = Math.floor(sampleCount / 2);
-
-  if (positives.length < targetPerLabel || negatives.length < targetPerLabel) {
-    throw new Error(
-      `Insufficient samples for balanced evaluation: need ${targetPerLabel} per label, got positives=${positives.length}, negatives=${negatives.length}.`,
-    );
+  // Group samples by label
+  const byLabel = new Map<number, BiomedTaskSample[]>();
+  for (const sample of samples) {
+    const label = sample.groundTruth ?? 0;
+    if (!byLabel.has(label)) {
+      byLabel.set(label, []);
+    }
+    byLabel.get(label)!.push(sample);
   }
 
-  const sampledPositives = shuffleInPlace([...positives], seed).slice(
-    0,
-    targetPerLabel,
-  );
-  const sampledNegatives = shuffleInPlace([...negatives], seed + 1).slice(
-    0,
-    targetPerLabel,
-  );
-  return shuffleInPlace([...sampledPositives, ...sampledNegatives], seed + 2);
+  const numClasses = byLabel.size;
+  const targetPerLabel = Math.floor(sampleCount / numClasses);
+
+  for (const [label, group] of byLabel) {
+    if (group.length < targetPerLabel) {
+      throw new Error(
+        `Insufficient samples for balanced evaluation: need ${targetPerLabel} per label, got label=${label} count=${group.length}.`,
+      );
+    }
+  }
+
+  const result: BiomedTaskSample[] = [];
+  let seedOffset = 0;
+  for (const [, group] of byLabel) {
+    const shuffled = shuffleInPlace([...group], seed + seedOffset);
+    result.push(...shuffled.slice(0, targetPerLabel));
+    seedOffset += 1;
+  }
+  return shuffleInPlace(result, seed + seedOffset);
 }
 
 function computeAuroc(labels: number[], scores: number[]): number | null {
@@ -235,7 +270,7 @@ function computeAuroc(labels: number[], scores: number[]): number | null {
   return u / (nPos * nNeg);
 }
 
-function computeMetrics(results: WorkflowResult[]): EvalMetrics {
+function computeBinaryMetrics(results: WorkflowResult[]): BinaryMetrics {
   let tp = 0;
   let tn = 0;
   let fp = 0;
@@ -274,6 +309,70 @@ function computeMetrics(results: WorkflowResult[]): EvalMetrics {
   return { total, accuracy, precision, recall, f1, auroc, tp, tn, fp, fn };
 }
 
+function computeMulticlassMetrics(results: WorkflowResult[]): MulticlassMetrics {
+  const allLabels = new Set<BiomedLabel>();
+  for (const r of results) {
+    allLabels.add(r.trace.groundTruth ?? 0);
+    allLabels.add(r.decision.label);
+  }
+  const sortedLabels = [...allLabels].sort((a, b) => a - b);
+
+  // Build confusion matrix: confusionMatrix[gold][predicted] = count
+  const cm: Record<string, Record<string, number>> = {};
+  for (const g of sortedLabels) {
+    cm[String(g)] = {};
+    for (const p of sortedLabels) {
+      cm[String(g)][String(p)] = 0;
+    }
+  }
+  for (const r of results) {
+    const gold = r.trace.groundTruth ?? 0;
+    const pred = r.decision.label;
+    cm[String(gold)][String(pred)] = (cm[String(gold)][String(pred)] ?? 0) + 1;
+  }
+
+  let totalCorrect = 0;
+  const perClass: PerClassMetrics[] = [];
+  for (const label of sortedLabels) {
+    const key = String(label);
+    let truePos = 0;
+    let falsePos = 0;
+    let falseNeg = 0;
+    let count = 0;
+    let predicted = 0;
+    for (const g of sortedLabels) {
+      for (const p of sortedLabels) {
+        const v = cm[String(g)][String(p)];
+        if (g === label && p === label) truePos += v;
+        if (g !== label && p === label) falsePos += v;
+        if (g === label && p !== label) falseNeg += v;
+        if (g === label) count += v;
+        if (p === label) predicted += v;
+      }
+    }
+    totalCorrect += truePos;
+    const precision = truePos + falsePos > 0 ? truePos / (truePos + falsePos) : 0;
+    const recall = truePos + falseNeg > 0 ? truePos / (truePos + falseNeg) : 0;
+    const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+    perClass.push({ label, count, predicted, correct: truePos, precision, recall, f1 });
+  }
+
+  const total = results.length;
+  const accuracy = total > 0 ? totalCorrect / total : 0;
+  const macroPrecision = perClass.length > 0 ? perClass.reduce((s, c) => s + c.precision, 0) / perClass.length : 0;
+  const macroRecall = perClass.length > 0 ? perClass.reduce((s, c) => s + c.recall, 0) / perClass.length : 0;
+  const macroF1 = perClass.length > 0 ? perClass.reduce((s, c) => s + c.f1, 0) / perClass.length : 0;
+
+  return { total, accuracy, macroF1, macroPrecision, macroRecall, perClass, confusionMatrix: cm };
+}
+
+function computeMetrics(results: WorkflowResult[], relationshipType: string): EvalMetrics {
+  if (MULTICLASS_TYPES.has(relationshipType)) {
+    return computeMulticlassMetrics(results);
+  }
+  return computeBinaryMetrics(results);
+}
+
 function updateRunningCounts(
   counts: RunningCounts,
   result: WorkflowResult,
@@ -282,6 +381,10 @@ function updateRunningCounts(
   const predicted = result.decision.label;
 
   counts.completed += 1;
+  if (predicted === gold) {
+    counts.correct += 1;
+  }
+  // Binary fallback counters (useful for binary types)
   if (predicted === 1 && gold === 1) {
     counts.tp += 1;
   } else if (predicted === 0 && gold === 0) {
@@ -310,13 +413,14 @@ function runningAccuracy(counts: RunningCounts): number {
   if (counts.completed === 0) {
     return 0;
   }
-  return (counts.tp + counts.tn) / counts.completed;
+  return counts.correct / counts.completed;
 }
 
 function reportProgress(counts: RunningCounts, total: number): void {
   const bar = renderProgressBar(counts.completed, total);
   const accuracy = runningAccuracy(counts);
-  const line = `[${bar}] ${counts.completed}/${total} acc=${accuracy.toFixed(4)} tp=${counts.tp} tn=${counts.tn} fp=${counts.fp} fn=${counts.fn}`;
+  const predDist = `tp=${counts.tp} tn=${counts.tn} fp=${counts.fp} fn=${counts.fn}`;
+  const line = `[${bar}] ${counts.completed}/${total} acc=${accuracy.toFixed(4)} correct=${counts.correct} ${predDist}`;
 
   if (process.stdout.isTTY) {
     process.stdout.write(`\r${line}`);
@@ -334,25 +438,33 @@ function summarizeExpertVotes(result: WorkflowResult): {
   negativeVoteCount: number;
   expertCount: number;
   positive_vote_prob: number;
+  voteCounts: Record<string, number>;
 } {
   const expertAssessments = (result.trace.assessments ?? []).filter(
     (assessment) => assessment.role !== 'arbiter',
   );
   const positiveVoteCount = expertAssessments.filter(
-    (assessment) => assessment.recommendedLabel === 1,
+    (assessment) => assessment.recommendedLabel >= 1,
   ).length;
   const negativeVoteCount = expertAssessments.filter(
-    (assessment) => assessment.recommendedLabel === 0,
+    (assessment) => assessment.recommendedLabel <= 0,
   ).length;
   const expertCount = expertAssessments.length;
   const positive_vote_prob =
     expertCount > 0 ? positiveVoteCount / expertCount : 0.5;
+
+  const voteCounts: Record<string, number> = {};
+  for (const assessment of expertAssessments) {
+    const key = String(assessment.recommendedLabel);
+    voteCounts[key] = (voteCounts[key] ?? 0) + 1;
+  }
 
   return {
     positiveVoteCount,
     negativeVoteCount,
     expertCount,
     positive_vote_prob,
+    voteCounts,
   };
 }
 
@@ -369,6 +481,7 @@ function summarizeResult(result: WorkflowResult) {
     expertVoteCount: voteStats.expertCount,
     expertPositiveVotes: voteStats.positiveVoteCount,
     expertNegativeVotes: voteStats.negativeVoteCount,
+    voteCounts: voteStats.voteCounts,
     rationale: result.decision.rationale,
     entityDict: result.trace.entityDict,
   };
@@ -406,6 +519,7 @@ async function main(): Promise<void> {
 
   const runningCounts: RunningCounts = {
     completed: 0,
+    correct: 0,
     tp: 0,
     tn: 0,
     fp: 0,
@@ -430,7 +544,7 @@ async function main(): Promise<void> {
     },
   );
 
-  const metrics = computeMetrics(results);
+  const metrics = computeMetrics(results, options.relationshipType);
   const payload = {
     relationshipType: options.relationshipType,
     sampleCount: options.sampleCount,

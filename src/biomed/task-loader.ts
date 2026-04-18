@@ -118,7 +118,25 @@ function readCsvRows(filePath: string): Record<string, string>[] {
 }
 
 function toBiomedLabel(raw: string | undefined): BiomedLabel {
-  return Number.parseInt(raw ?? '0', 10) === 1 ? 1 : 0;
+  const n = Number.parseInt(raw ?? '0', 10);
+  if (n === -1 || n === 0 || n === 1 || n === 2) {
+    return n;
+  }
+  return 0;
+}
+
+/**
+ * Remap raw labels per relationship type.
+ * drug_drug_cell-line: collapse 4-class into binary (synergy=1 vs rest=0).
+ */
+function remapLabel(
+  label: BiomedLabel,
+  relationshipType: string,
+): BiomedLabel {
+  if (relationshipType === 'drug_drug_cell-line') {
+    return label === 2 ? 1 : 0;
+  }
+  return label;
 }
 
 function buildEntityDict(
@@ -194,7 +212,10 @@ export class CsvTaskLoader implements TaskLoader {
           sampleIndex,
           relationshipType: this.options.relationshipType,
           entityDict: buildEntityDict(entityValues, structure),
-          groundTruth: toBiomedLabel(row[labelColumn]),
+          groundTruth: remapLabel(
+            toBiomedLabel(row[labelColumn]),
+            this.options.relationshipType,
+          ),
         });
         sampleIndex += 1;
 

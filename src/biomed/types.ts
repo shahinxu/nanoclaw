@@ -1,4 +1,4 @@
-export type BiomedLabel = 0 | 1;
+export type BiomedLabel = -1 | 0 | 1 | 2;
 
 export type BiomedEntityValue = string | string[];
 
