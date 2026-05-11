@@ -69,11 +69,16 @@ interface RunningCounts {
   fn: number;
 }
 
+function createRuntimeSeed(): number {
+  // Keep seed in uint32 range for the PRNG implementation.
+  return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     relationshipType: 'drug_protein_disease',
     sampleCount: 100,
-    seed: 42,
+    seed: createRuntimeSeed(),
     dataDir: DEFAULT_BIOMED_CONFIG.dataDir,
     graphDataDir: DEFAULT_BIOMED_CONFIG.graphDataDir,
     workspaceRoot: DEFAULT_BIOMED_CONFIG.workspaceRoot,

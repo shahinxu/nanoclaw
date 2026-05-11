@@ -75,7 +75,7 @@ export const DEFAULT_BIOMED_CONFIG: BiomedWorkflowConfig = {
   openRouterBaseUrl:
     process.env.BIOMED_OPENROUTER_BASE_URL ??
     process.env.OPENROUTER_BASE_URL ??
-    'http://localhost:8000/v1',
+    'https://openrouter.ai/api/v1',
   openRouterModel:
     process.env.BIOMED_OPENROUTER_MODEL ??
     process.env.OPENROUTER_MODEL ??

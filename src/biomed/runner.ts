@@ -225,6 +225,75 @@ function buildSharedEvidenceBoard(
   };
 }
 
+function buildFallbackRoundObjective(
+  roundNumber: number,
+  allRoles: ActiveAgentRole[],
+): RoundObjective {
+  const roleText = allRoles.join(', ');
+  return {
+    title: `Round ${roundNumber} Focus`,
+    directive:
+      `Review the latest evidence board, challenge weak assumptions, and provide your strongest argument for or against the current hypothesis. Keep role responsibilities explicit (${roleText}).`,
+    responseRequirement:
+      'Return exactly one label recommendation and include concise evidence-backed justification with at least one uncertainty or limitation.',
+    targetRoles: allRoles,
+  };
+}
+
+function parsePlannerRoundObjective(
+  structured: unknown,
+  allRoles: ActiveAgentRole[],
+): RoundObjective | null {
+  if (!structured || typeof structured !== 'object') {
+    return null;
+  }
+
+  const value = structured as Record<string, unknown>;
+  const title = String(value.title ?? '').trim();
+  const directive = String(value.directive ?? '').trim();
+  const responseRequirement = String(value.response_requirement ?? '').trim();
+  const sharedDebateQuestion = String(
+    value.shared_debate_question ?? '',
+  ).trim();
+  const targetRolesRaw = value.target_roles;
+
+  if (!title || !directive || !responseRequirement) {
+    return null;
+  }
+
+  const allowed = new Set(allRoles);
+  const parsedTargetRoles = Array.isArray(targetRolesRaw)
+    ? [
+        ...new Set(
+          targetRolesRaw
+            .map((item) => String(item ?? '').trim())
+            .filter(
+              (item): item is ActiveAgentRole =>
+                item === 'drug' ||
+                item === 'protein' ||
+                item === 'disease' ||
+                item === 'sideeffect' ||
+                item === 'cellline' ||
+                item === 'graph',
+            )
+            .filter((role) => allowed.has(role)),
+        ),
+      ]
+    : [];
+
+  if (parsedTargetRoles.length === 0) {
+    return null;
+  }
+
+  return {
+    title,
+    directive,
+    responseRequirement,
+    sharedDebateQuestion: sharedDebateQuestion || undefined,
+    targetRoles: parsedTargetRoles,
+  };
+}
+
 async function buildRoundObjectiveWithLLM(
   toolAdapter: ResearchToolAdapter,
   sample: BiomedTaskSample,
@@ -256,64 +325,16 @@ async function buildRoundObjectiveWithLLM(
       `round_objective_planner failed in round ${roundNumber}: ${plannerResult.error ?? 'unknown error'}`,
     );
   }
-  if (!plannerResult.structured) {
-    throw new Error(
-      `round_objective_planner returned empty structured payload in round ${roundNumber}`,
-    );
+
+  const parsed = parsePlannerRoundObjective(plannerResult.structured, allRoles);
+  if (parsed) {
+    return parsed;
   }
 
-  const title = String(plannerResult.structured.title ?? '').trim();
-  const directive = String(plannerResult.structured.directive ?? '').trim();
-  const responseRequirement = String(
-    plannerResult.structured.response_requirement ?? '',
-  ).trim();
-  const sharedDebateQuestion = String(
-    plannerResult.structured.shared_debate_question ?? '',
-  ).trim();
-  const targetRolesRaw = plannerResult.structured.target_roles;
-
-  if (!title || !directive || !responseRequirement) {
-    throw new Error(
-      `round_objective_planner returned invalid title/directive/response_requirement in round ${roundNumber}`,
-    );
-  }
-  if (!Array.isArray(targetRolesRaw) || targetRolesRaw.length === 0) {
-    throw new Error(
-      `round_objective_planner returned empty target_roles in round ${roundNumber}`,
-    );
-  }
-
-  const allowed = new Set(allRoles);
-  const parsedTargetRoles = [
-    ...new Set(
-      targetRolesRaw
-        .map((item) => String(item || '').trim())
-        .filter(
-          (item): item is ActiveAgentRole =>
-            item === 'drug' ||
-            item === 'protein' ||
-            item === 'disease' ||
-            item === 'sideeffect' ||
-            item === 'cellline' ||
-            item === 'graph',
-        )
-        .filter((role) => allowed.has(role)),
-    ),
-  ];
-
-  if (parsedTargetRoles.length === 0) {
-    throw new Error(
-      `round_objective_planner target_roles are invalid for current role plan in round ${roundNumber}`,
-    );
-  }
-
-  return {
-    title,
-    directive,
-    responseRequirement,
-    sharedDebateQuestion: sharedDebateQuestion || undefined,
-    targetRoles: parsedTargetRoles,
-  };
+  console.warn(
+    `round_objective_planner returned invalid structured payload in round ${roundNumber}; falling back to default round objective.`,
+  );
+  return buildFallbackRoundObjective(roundNumber, allRoles);
 }
 
 function collectPeerEvidence(
