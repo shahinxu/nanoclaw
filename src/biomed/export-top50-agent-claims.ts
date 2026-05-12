@@ -7,6 +7,7 @@ import type { AgentAssessment, BiomedTaskSample, EvidenceItem, WorkflowResult } 
 
 interface CliOptions {
   top50Path: string;
+  inputJsonl: string;
   outputPath: string;
   dataDir: string;
   graphDataDir: string;
@@ -31,6 +32,7 @@ interface Top50Row {
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     top50Path: path.resolve('../logs_agentic/ad_top50_high_confidence_drugs.csv'),
+    inputJsonl: '',
     outputPath: path.resolve('../logs_agentic/ad_top50_with_claims.jsonl'),
     dataDir: DEFAULT_BIOMED_CONFIG.dataDir,
     graphDataDir: DEFAULT_BIOMED_CONFIG.graphDataDir,
@@ -48,6 +50,9 @@ function parseArgs(argv: string[]): CliOptions {
     const next = argv[index + 1];
     if (arg === '--top50Path' && next) {
       options.top50Path = next;
+      index += 1;
+    } else if (arg === '--inputJsonl' && next) {
+      options.inputJsonl = next;
       index += 1;
     } else if (arg === '--outputPath' && next) {
       options.outputPath = next;
@@ -142,6 +147,37 @@ function readTop50Rows(filePath: string): Top50Row[] {
   return rows.sort((left, right) => left.rank - right.rank);
 }
 
+function readRowsFromJsonl(filePath: string): Top50Row[] {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim() !== '');
+  const rows: Top50Row[] = [];
+
+  lines.forEach((line, index) => {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const predicted = parsed.predictedLabel;
+    if (predicted !== undefined && Number(predicted) !== 1) {
+      return;
+    }
+
+    const drugId = String(parsed.drugId ?? '');
+    const diseaseId = String(parsed.diseaseId ?? '');
+    if (!drugId || !diseaseId) {
+      return;
+    }
+
+    rows.push({
+      rank: index + 1,
+      drugId,
+      confidence: Number(parsed.confidence ?? 0),
+      diseaseId,
+      status: String(parsed.status ?? ''),
+      decisionMode: String(parsed.decisionMode ?? ''),
+    });
+  });
+
+  return rows;
+}
+
 function serializeEvidenceItems(items: EvidenceItem[]): string {
   return JSON.stringify(
     items.map((item) => ({
@@ -215,16 +251,38 @@ function formatDuration(ms: number): string {
   return `${minutes}m${String(seconds).padStart(2, '0')}s`;
 }
 
+function renderProgress(
+  completed: number,
+  total: number,
+  succeeded: number,
+  failed: number,
+  startedAt: number,
+): void {
+  const ratio = total > 0 ? completed / total : 1;
+  const percent = (ratio * 100).toFixed(1);
+  const elapsedMs = Date.now() - startedAt;
+  const avgMs = completed > 0 ? elapsedMs / completed : 0;
+  const etaMs = Math.max(0, Math.round(avgMs * (total - completed)));
+  process.stdout.write(
+    `\rProgress ${completed}/${total} (${percent}%) ok=${succeeded} fail=${failed} elapsed=${formatDuration(elapsedMs)} eta=${formatDuration(etaMs)}`,
+  );
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const top50Rows = readTop50Rows(options.top50Path);
-  const total = top50Rows.length;
+  const inputRows = options.inputJsonl
+    ? readRowsFromJsonl(path.resolve(options.inputJsonl))
+    : readTop50Rows(path.resolve(options.top50Path));
+  const total = inputRows.length;
 
   if (total === 0) {
+    if (options.inputJsonl) {
+      throw new Error(`No usable rows found in JSONL: ${options.inputJsonl}`);
+    }
     throw new Error(`No rows found in top50 CSV: ${options.top50Path}`);
   }
 
-  const selected = top50Rows.map((row) => {
+  const selected = inputRows.map((row) => {
     const sample: BiomedTaskSample = {
       sampleIndex: row.rank,
       relationshipType: 'drug_disease',
@@ -256,9 +314,7 @@ async function main(): Promise<void> {
     fs.appendFileSync(options.outputPath, `${JSON.stringify(record)}\n`, 'utf8');
   };
 
-  const originalLog = console.log;
   const originalWarn = console.warn;
-  console.log = () => {};
   console.warn = (...args: unknown[]) => {
     const text = args
       .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
@@ -273,8 +329,10 @@ async function main(): Promise<void> {
   };
 
   const startedAt = Date.now();
+  let completed = 0;
   let succeeded = 0;
   let failed = 0;
+  renderProgress(completed, total, succeeded, failed, startedAt);
 
   await mapWithConcurrency(
     selected,
@@ -342,13 +400,15 @@ async function main(): Promise<void> {
           error: message,
         });
       } finally {
+        completed += 1;
+        renderProgress(completed, total, succeeded, failed, startedAt);
       }
     },
   );
 
-  console.log = originalLog;
   console.warn = originalWarn;
   const elapsedMs = Date.now() - startedAt;
+  process.stdout.write('\n');
   console.log(`Done: total=${total}, ok=${succeeded}, fail=${failed}, elapsed=${formatDuration(elapsedMs)} -> ${options.outputPath}`);
 }
 
