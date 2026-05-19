@@ -39,8 +39,8 @@
  *     --maxRounds 5 \
  *     --tiers A,B,C,D \
  *     --tierBLimit 200 --tierCLimit 500 --tierDLimit 500 \
- *     --outputPath /tmp/hs_drug_drug_pipeline.json
  */
+
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,7 +49,7 @@ import { createReadStream } from 'node:fs';
 
 import { BiomedWorkflowRunner } from './runner.js';
 import { DEFAULT_BIOMED_CONFIG } from './config.js';
-import type { BiomedTaskSample, WorkflowResult } from './types.js';
+import type { BiomedTaskSample, SampleTraceRecord, WorkflowResult } from './types.js';
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -75,7 +75,8 @@ interface CliOptions {
   tierBLimit: number; // max pairs from Tier B (0 = all)
   tierCLimit: number; // max pairs from Tier C (0 = all)
   tierDLimit: number; // max pairs from Tier D (0 = all)
-  outputPath: string;
+  /** Write one JSONL record per effective pair (with Stage 2 results) to this file */
+  jsonlPath: string;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -97,7 +98,7 @@ function parseArgs(argv: string[]): CliOptions {
     tierBLimit: 0,
     tierCLimit: 0,
     tierDLimit: 0,
-    outputPath: '/tmp/hs_drug_drug_pipeline.json',
+    jsonlPath: '/tmp/drug_drug_pairs.jsonl',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -173,8 +174,8 @@ function parseArgs(argv: string[]): CliOptions {
         opts.tierDLimit = Number.parseInt(next, 10);
         i += 1;
         break;
-      case '--outputPath':
-        opts.outputPath = next;
+      case '--jsonlPath':
+        opts.jsonlPath = next;
         i += 1;
         break;
     }
@@ -202,6 +203,32 @@ function summarizeVotes(result: WorkflowResult) {
       summary: a.summary,
     })),
   };
+}
+
+/**
+ * Strip LLM voting-prefix boilerplate from agent evidence text.
+ * Removes patterns like "I currently vote 1 because " so only the actual
+ * reasoning/evidence content is stored in the JSONL record.
+ */
+function stripVotePrefix(text: string): string {
+  return text
+    .replace(/^I (?:currently )?vote \d+ because /i, '')
+    .trim();
+}
+
+/** Load CUI → human-readable name mapping from node_side_effect_description.csv */
+async function loadCuiToNameMap(workspaceRoot: string): Promise<Map<string, string>> {
+  const csvPath = path.join(workspaceRoot, 'data_node', 'node_side_effect_description.csv');
+  const map = new Map<string, string>();
+  if (!fs.existsSync(csvPath)) return map;
+  const rl = readline.createInterface({ input: createReadStream(csvPath), crlfDelay: Infinity });
+  let header = true;
+  for await (const line of rl) {
+    if (header) { header = false; continue; }
+    const [cui, nodeName] = line.split(',');
+    if (cui && nodeName) map.set(cui.trim(), nodeName.trim());
+  }
+  return map;
 }
 
 async function mapWithConcurrency<T, U>(
@@ -234,6 +261,21 @@ async function readCsvLines(filePath: string): Promise<string[]> {
   return lines;
 }
 
+/** Read every order_*.csv in trainingDir once and return pre-split rows. */
+async function loadAllCsvLines(trainingDir: string): Promise<string[][]> {
+  const files = fs
+    .readdirSync(trainingDir)
+    .filter((f: string) => /^order_.*\.csv$/u.test(f));
+  const result: string[][] = [];
+  for (const file of files) {
+    const raw = await readCsvLines(path.join(trainingDir, file));
+    for (const line of raw) {
+      if (line.trim()) result.push(line.split(','));
+    }
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Stage 0: Multi-strategy drug discovery
 // ---------------------------------------------------------------------------
@@ -255,123 +297,95 @@ interface DiscoveryResult {
   neighborBreadth: Map<string, number>;
 }
 
-async function discoverDrugs(
-  trainingDir: string,
-  diseaseId: string,
-): Promise<DiscoveryResult> {
+function discoverDrugs(lines: string[][], diseaseId: string): DiscoveryResult {
   const knownHS = new Set<string>();
   const hsProteins = new Set<string>();
   const neighborDiseases = new Set<string>();
 
-  const files = fs
-    .readdirSync(trainingDir)
-    .filter((f: string) => /^order_.*\.csv$/u.test(f));
+  // ── Pass A: collect known HS drugs, HS proteins, HS neighbor diseases ─
+  for (const parts of lines) {
+    if (parts.length < 3) continue;
+    const rel = parts[0];
+    const rest = parts.slice(1);
+    if (rest[rest.length - 1] !== '1') continue;
 
-  // ── Pass 1: collect known HS drugs, HS proteins, HS neighbor diseases ─
-  for (const file of files) {
-    const lines = await readCsvLines(path.join(trainingDir, file));
-    for (const line of lines) {
-      const parts = line.split(',');
-      if (parts.length < 3) continue;
-      const [rel, ...rest] = parts;
-      const label = rest[rest.length - 1];
+    if (
+      (rel === 'drug_protein_disease' || rel === 'drug_disease') &&
+      rest.includes(diseaseId)
+    ) {
+      for (const v of rest.slice(0, -1)) {
+        if (v.startsWith('DB')) knownHS.add(v);
+      }
+    }
+    if (rel === 'drug_protein_disease' && rest.length >= 4) {
+      const [, protein, disease] = rest;
+      if (disease === diseaseId) hsProteins.add(protein);
+    }
+    if (rel === 'disease_disease') {
+      const [e1, e2] = rest;
+      if (e1 === diseaseId) neighborDiseases.add(e2);
+      else if (e2 === diseaseId) neighborDiseases.add(e1);
+    }
+  }
 
-      if (label === '1') {
-        // Strategy 1
-        if (
-          (rel === 'drug_protein_disease' || rel === 'drug_disease') &&
-          rest.includes(diseaseId)
-        ) {
-          for (const v of rest.slice(0, -1)) {
-            if (v.startsWith('DB')) knownHS.add(v);
-          }
+  // ── Pass B: strategies 2, 3, 4 — all depend on Pass A results ────────
+  const drugProteins = new Map<string, Set<string>>();
+  const neighborDiseaseDrugs = new Set<string>();
+  const neighborBreadth = new Map<string, number>();
+  const cooccurDrugs = new Set<string>();
+
+  for (const parts of lines) {
+    if (parts.length < 3) continue;
+    const rel = parts[0];
+    const label = parts[parts.length - 1];
+
+    // Strategy 2: mechanism-sharing drugs
+    if (rel === 'drug_protein_disease' && parts.length >= 5 && label === '1') {
+      const drug = parts[1];
+      const protein = parts[2];
+      if (!knownHS.has(drug) && hsProteins.has(protein)) {
+        if (!drugProteins.has(drug)) drugProteins.set(drug, new Set());
+        drugProteins.get(drug)!.add(protein);
+      }
+    }
+
+    if (label === '1') {
+      // Strategy 3a: drug_protein_disease → neighbor disease
+      if (rel === 'drug_protein_disease' && parts.length >= 5) {
+        const drug = parts[1];
+        const disease = parts[3];
+        if (neighborDiseases.has(disease) && !knownHS.has(drug)) {
+          neighborDiseaseDrugs.add(drug);
+          neighborBreadth.set(drug, (neighborBreadth.get(drug) ?? 0) + 1);
         }
-        // Collect HS proteins
-        if (rel === 'drug_protein_disease' && rest.length >= 4) {
-          const [drug, protein, disease] = rest;
-          if (disease === diseaseId) {
-            hsProteins.add(protein);
-          }
-        }
-        // Neighbor diseases
-        if (rel === 'disease_disease') {
-          const [e1, e2] = rest;
-          if (e1 === diseaseId) neighborDiseases.add(e2);
-          else if (e2 === diseaseId) neighborDiseases.add(e1);
+      }
+      // Strategy 3b: drug_disease → neighbor disease
+      if (rel === 'drug_disease' && parts.length >= 4) {
+        const drug = parts[1];
+        const disease = parts[2];
+        if (neighborDiseases.has(disease) && !knownHS.has(drug)) {
+          neighborDiseaseDrugs.add(drug);
+          neighborBreadth.set(drug, (neighborBreadth.get(drug) ?? 0) + 1);
         }
       }
     }
-  }
 
-  // ── Pass 2: Strategy 2 — drugs sharing HS mechanism proteins ──────────
-  // Also builds protein→drug map for breadth scoring
-  const drugProteins = new Map<string, Set<string>>();
-  for (const file of files) {
-    const lines = await readCsvLines(path.join(trainingDir, file));
-    for (const line of lines) {
-      const parts = line.split(',');
-      if (parts.length < 5) continue;
-      const [rel, drug, protein, , label] = parts;
-      if (rel !== 'drug_protein_disease' || label !== '1') continue;
-      if (knownHS.has(drug)) continue;
-      if (!hsProteins.has(protein)) continue;
-
-      if (!drugProteins.has(drug)) drugProteins.set(drug, new Set());
-      drugProteins.get(drug)!.add(protein);
+    // Strategy 4: co-occurrence
+    if (
+      (rel === 'drug_drug_sideeffect' || rel === 'drug_drug_cell-line') &&
+      parts.length >= 5
+    ) {
+      const d1 = parts[1];
+      const d2 = parts[2];
+      if (knownHS.has(d1) && d2.startsWith('DB') && !knownHS.has(d2)) cooccurDrugs.add(d2);
+      if (knownHS.has(d2) && d1.startsWith('DB') && !knownHS.has(d1)) cooccurDrugs.add(d1);
     }
   }
+
   const mechanismDrugs = new Set(drugProteins.keys());
   const mechanismBreadth = new Map<string, number>();
   for (const [drug, proteinSet] of drugProteins) {
     mechanismBreadth.set(drug, proteinSet.size);
-  }
-
-  // ── Pass 3: Strategy 3 — drugs linked to neighbor diseases ────────────
-  const neighborDiseaseDrugs = new Set<string>();
-  const neighborBreadth = new Map<string, number>();
-  for (const file of files) {
-    const lines = await readCsvLines(path.join(trainingDir, file));
-    for (const line of lines) {
-      const parts = line.split(',');
-      if (parts.length < 3) continue;
-      const [rel, ...rest] = parts;
-      const label = rest[rest.length - 1];
-      if (label !== '1') continue;
-
-      if (rel === 'drug_protein_disease' && rest.length >= 4) {
-        const [drug, , disease] = rest;
-        if (neighborDiseases.has(disease) && !knownHS.has(drug)) {
-          neighborDiseaseDrugs.add(drug);
-          neighborBreadth.set(drug, (neighborBreadth.get(drug) ?? 0) + 1);
-        }
-      }
-      if (rel === 'drug_disease' && rest.length >= 3) {
-        const [drug, disease] = rest;
-        if (neighborDiseases.has(disease) && !knownHS.has(drug)) {
-          neighborDiseaseDrugs.add(drug);
-          neighborBreadth.set(drug, (neighborBreadth.get(drug) ?? 0) + 1);
-        }
-      }
-    }
-  }
-
-  // ── Pass 4: Strategy 4 — co-occurring drugs ──────────────────────────
-  const cooccurDrugs = new Set<string>();
-  for (const file of files) {
-    const lines = await readCsvLines(path.join(trainingDir, file));
-    for (const line of lines) {
-      const parts = line.split(',');
-      if (parts.length < 5) continue;
-      const [rel, d1, d2] = parts;
-      if (rel !== 'drug_drug_sideeffect' && rel !== 'drug_drug_cell-line')
-        continue;
-      if (knownHS.has(d1) && d2.startsWith('DB') && !knownHS.has(d2)) {
-        cooccurDrugs.add(d2);
-      }
-      if (knownHS.has(d2) && d1.startsWith('DB') && !knownHS.has(d1)) {
-        cooccurDrugs.add(d1);
-      }
-    }
   }
 
   return {
@@ -501,30 +515,22 @@ function generateTieredPairs(
 // Side-effect profile collection
 // ---------------------------------------------------------------------------
 
-async function collectDrugSideEffectProfiles(
-  trainingDir: string,
+function collectDrugSideEffectProfiles(
+  lines: string[][],
   drugSet: Set<string>,
-): Promise<Map<string, Map<string, number>>> {
+): Map<string, Map<string, number>> {
   const profiles = new Map<string, Map<string, number>>();
 
-  const files = fs
-    .readdirSync(trainingDir)
-    .filter((f: string) => /^order_.*\.csv$/u.test(f));
+  for (const parts of lines) {
+    if (parts.length < 5) continue;
+    const [rel, d1, d2, se, label] = parts;
+    if (rel !== 'drug_drug_sideeffect' || label !== '1') continue;
 
-  for (const file of files) {
-    const lines = await readCsvLines(path.join(trainingDir, file));
-    for (const line of lines) {
-      const parts = line.split(',');
-      if (parts.length < 5) continue;
-      const [rel, d1, d2, se, label] = parts;
-      if (rel !== 'drug_drug_sideeffect' || label !== '1') continue;
-
-      for (const d of [d1, d2]) {
-        if (!drugSet.has(d)) continue;
-        if (!profiles.has(d)) profiles.set(d, new Map());
-        const seMap = profiles.get(d)!;
-        seMap.set(se, (seMap.get(se) ?? 0) + 1);
-      }
+    for (const d of [d1, d2]) {
+      if (!drugSet.has(d)) continue;
+      if (!profiles.has(d)) profiles.set(d, new Map());
+      const seMap = profiles.get(d)!;
+      seMap.set(se, (seMap.get(se) ?? 0) + 1);
     }
   }
   return profiles;
@@ -563,6 +569,8 @@ interface Stage1Result {
   positiveVoteProb: number;
   rationale: string;
   votesByRole: Array<{ role: string; label: number; summary: string }>;
+  /** Full multi-round debate trace from the workflow */
+  trace: SampleTraceRecord | null;
   error: string | null;
 }
 
@@ -570,7 +578,7 @@ async function runStage1(
   tieredPairs: TieredPair[],
   diseaseId: string,
   opts: CliOptions,
-  onResult?: (result: Stage1Result) => void,
+  onResult?: (result: Stage1Result) => void | Promise<void>,
 ): Promise<Stage1Result[]> {
   console.log(
     `\n=== Stage 1: drug_drug_disease debate (${tieredPairs.length} pairs) ===`,
@@ -627,9 +635,12 @@ async function runStage1(
           positiveVoteProb: votes.positiveVoteProb,
           rationale: result.decision.rationale,
           votesByRole: votes.votesByRole,
+          trace: result.trace.rounds.length > 0
+            ? { ...result.trace, rounds: result.trace.rounds.slice(-1) }
+            : result.trace,
           error: null,
         };
-        onResult?.(r);
+        await onResult?.(r);
         return r;
       } catch (err) {
         completed += 1;
@@ -647,9 +658,10 @@ async function runStage1(
           positiveVoteProb: 0,
           rationale: '',
           votesByRole: [],
+          trace: null,
           error: String(err),
         };
-        onResult?.(r);
+        await onResult?.(r);
         return r;
       }
     },
@@ -671,20 +683,12 @@ interface Stage2PairResult {
   positiveSideEffects: string[];
   negativeSideEffects: string[];
   errorSideEffects: string[];
-  details: Array<{
-    sideEffectId: string;
-    predictedLabel: 0 | 1;
-    confidence: number;
-    positiveVoteProb: number;
-    error: string | null;
-  }>;
 }
 
 async function runStage2(
   effectivePairs: Array<{ drug1: string; drug2: string; tier: TierName }>,
   profiles: Map<string, Map<string, number>>,
   opts: CliOptions,
-  onPairDone?: (result: Stage2PairResult) => void,
 ): Promise<Stage2PairResult[]> {
   console.log(
     `\n=== Stage 2: drug_drug_sideeffect debate (${effectivePairs.length} effective pairs) ===\n`,
@@ -718,85 +722,52 @@ async function runStage2(
     );
 
     if (sideEffects.length === 0) {
-      const pr: Stage2PairResult = {
-        drug1,
-        drug2,
-        tier,
+      pairResults.push({
+        drug1, drug2, tier,
         sideEffectsTested: 0,
         positiveSideEffects: [],
         negativeSideEffects: [],
         errorSideEffects: [],
-        details: [],
-      };
-      pairResults.push(pr);
-      onPairDone?.(pr);
+      });
       continue;
     }
 
     let completed = 0;
-    const details = await mapWithConcurrency(
+    const seResults = await mapWithConcurrency(
       sideEffects,
       opts.seConcurrency,
       async (seId, idx) => {
         const sample: BiomedTaskSample = {
           sampleIndex: idx,
           relationshipType: 'drug_drug_sideeffect',
-          entityDict: {
-            drugs: [drug1, drug2],
-            sideeffect: seId,
-          },
+          entityDict: { drugs: [drug1, drug2], sideeffect: seId },
         };
-
         try {
           const result = await runner.runSample(sample);
           completed += 1;
-          const votes = summarizeVotes(result);
           process.stdout.write(
             `\r    [${completed}/${sideEffects.length}] SE=${seId} => label=${result.decision.label}  `,
           );
-          return {
-            sideEffectId: seId,
-            predictedLabel: result.decision.label as 0 | 1,
-            confidence: result.decision.confidence,
-            positiveVoteProb: votes.positiveVoteProb,
-            error: null,
-          };
+          return { seId, label: result.decision.label as 0 | 1, error: null as string | null };
         } catch (err) {
           completed += 1;
           process.stdout.write(
             `\r    [${completed}/${sideEffects.length}] SE=${seId} => ERROR  `,
           );
-          return {
-            sideEffectId: seId,
-            predictedLabel: 0 as const,
-            confidence: 0,
-            positiveVoteProb: 0,
-            error: String(err),
-          };
+          return { seId, label: 0 as const, error: String(err) };
         }
       },
     );
 
     console.log('');
 
-    const pr: Stage2PairResult = {
-      drug1,
-      drug2,
-      tier,
+    pairResults.push({
+      drug1, drug2, tier,
       sideEffectsTested: sideEffects.length,
-      positiveSideEffects: details
-        .filter((d) => d.predictedLabel === 1 && !d.error)
-        .map((d) => d.sideEffectId),
-      negativeSideEffects: details
-        .filter((d) => d.predictedLabel === 0 && !d.error)
-        .map((d) => d.sideEffectId),
-      errorSideEffects: details
-        .filter((d) => d.error)
-        .map((d) => d.sideEffectId),
-      details,
-    };
-    pairResults.push(pr);
-    onPairDone?.(pr);
+      positiveSideEffects: seResults.filter((d) => d.label === 1 && !d.error).map((d) => d.seId),
+      negativeSideEffects: seResults.filter((d) => d.label === 0 && !d.error).map((d) => d.seId),
+      errorSideEffects: seResults.filter((d) => d.error).map((d) => d.seId),
+    });
   }
 
   return pairResults;
@@ -901,12 +872,13 @@ async function main() {
   console.log(
     `Concurrency      : Stage1=${opts.concurrency}  Stage2=${opts.seConcurrency}`,
   );
-  console.log(`Output           : ${opts.outputPath}\n`);
+  console.log(`JSONL output     : ${opts.jsonlPath}\n`);
 
   // ── Stage 0a: Multi-strategy drug discovery ───────────────────────────
   console.log('════════ Stage 0: Drug Discovery ════════');
-  console.log('Running 4-strategy drug discovery...\n');
-  const discovery = await discoverDrugs(opts.trainingDir, opts.diseaseId);
+  console.log('Loading training data...\n');
+  const allLines = await loadAllCsvLines(opts.trainingDir);
+  const discovery = discoverDrugs(allLines, opts.diseaseId);
 
   console.log(
     `Strategy 1 — Known HS drugs          : ${discovery.knownHS.size}`,
@@ -960,80 +932,75 @@ async function main() {
   console.log(
     `\nBuilding side-effect profiles for ${allDrugsInPairs.size} drugs...`,
   );
-  const seProfiles = await collectDrugSideEffectProfiles(
-    opts.trainingDir,
-    allDrugsInPairs,
-  );
+  const seProfiles = collectDrugSideEffectProfiles(allLines, allDrugsInPairs);
   let drugsWithSE = 0;
   for (const [, seMap] of seProfiles) {
     if (seMap.size > 0) drugsWithSE += 1;
   }
   console.log(`  ${drugsWithSE} drugs have known side-effect profiles.`);
 
-  // ── Incremental output ────────────────────────────────────────────────
-  const liveOutput: Record<string, any> = {
-    diseaseId: opts.diseaseId,
-    timestamp: new Date().toISOString(),
-    config: {
-      maxRounds: opts.maxRounds,
-      maxSERounds: opts.maxSERounds,
-      topKSideEffects: opts.topKSideEffects,
-      tiers: opts.tiers,
-      tierBLimit: opts.tierBLimit,
-      tierCLimit: opts.tierCLimit,
-      tierDLimit: opts.tierDLimit,
-    },
-    discovery: {
-      knownHSCount: discovery.knownHS.size,
-      knownHS: [...discovery.knownHS].sort(),
-      mechanismDrugCount: discovery.mechanismDrugs.size,
-      neighborDiseaseDrugCount: discovery.neighborDiseaseDrugs.size,
-      cooccurDrugCount: discovery.cooccurDrugs.size,
-      totalUniqueDrugs: allUnique.size,
-      hsProteins: [...discovery.hsProteins].sort(),
-    },
-    pairGeneration: {
-      tierA: tierCounts.A,
-      tierB: tierCounts.B,
-      tierC: tierCounts.C,
-      tierD: tierCounts.D,
-      total: tieredPairs.length,
-    },
-    stage1: {
-      effective: [] as Stage1Result[],
-      ineffective: [] as Stage1Result[],
-      errors: [] as Stage1Result[],
-    },
-    stage2: [] as Stage2PairResult[],
-    summary: null as Record<ThreeWayLabel, number> | null,
-    classified: null as ClassifiedPair[] | null,
-  };
+  // ── Load CUI → side-effect name mapping ──────────────────────────────
+  const cui2name = await loadCuiToNameMap(opts.workspaceRoot);
+  console.log(`  Loaded ${cui2name.size} CUI→name mappings.`);
 
-  function flushOutput() {
-    fs.writeFileSync(
-      opts.outputPath,
-      JSON.stringify(liveOutput, null, 2),
-      'utf8',
+  // ── Initialize JSONL output (one record per effective pair) ───────────
+  fs.writeFileSync(opts.jsonlPath, '', 'utf8'); // clear/create
+
+  // In-memory tracking for stage2Map (used by Stage 3)
+  const stage2ResultsInline: Stage2PairResult[] = [];
+
+  // ── Stage 1: drug_drug_disease debate ──────────────────────────────────
+  const stage1Results: Stage1Result[] = await runStage1(
+      tieredPairs,
+      opts.diseaseId,
+      opts,
+      async (r) => {
+        if (!r.error && r.predictedLabel === 1) {
+
+          // ── Immediately run Stage 2 for this effective pair ────────────
+          const s2Results = await runStage2(
+            [{ drug1: r.drug1, drug2: r.drug2, tier: r.tier }],
+            seProfiles,
+            opts,
+          );
+          const s2 = s2Results[0] ?? {
+            drug1: r.drug1, drug2: r.drug2, tier: r.tier,
+            sideEffectsTested: 0, positiveSideEffects: [],
+            negativeSideEffects: [], errorSideEffects: [], details: [],
+          };
+          stage2ResultsInline.push(s2);
+
+          // ── Extract per-role evidence from Stage 1 trace ───────────────
+          const asmMap = new Map<string, any>(
+            ((r.trace as any)?.assessments ?? []).map((a: any) => [a.role, a]),
+          );
+          const drugAgent = asmMap.get('drug_agent');
+          const diseaseAgent = asmMap.get('disease_agent');
+          const graphAgent = asmMap.get('graph_agent');
+
+          // ── Map CUI codes to human-readable side-effect names ──────────
+          const positiveSENames = (s2.positiveSideEffects ?? []).map(
+            (cui: string) => cui2name.get(cui) ?? cui,
+          );
+
+          // ── Write JSONL record ─────────────────────────────────────────
+          const record = {
+            drug1: r.drug1,
+            drug2: r.drug2,
+            stage1_label: r.predictedLabel,
+            confidence: r.confidence,
+            drug_agent_label: drugAgent?.recommendedLabel ?? null,
+            drug_agent_evidence: stripVotePrefix(drugAgent?.evidenceItems?.[0]?.claim ?? ''),
+            disease_agent_label: diseaseAgent?.recommendedLabel ?? null,
+            disease_agent_evidence: stripVotePrefix(diseaseAgent?.evidenceItems?.[0]?.claim ?? ''),
+            graph_agent_label: graphAgent?.recommendedLabel ?? null,
+            graph_agent_evidence: stripVotePrefix(graphAgent?.evidenceItems?.[0]?.claim ?? ''),
+            sideEffects: positiveSENames,
+          };
+          fs.appendFileSync(opts.jsonlPath, JSON.stringify(record) + '\n', 'utf8');
+        }
+      },
     );
-  }
-  flushOutput(); // write initial structure
-
-  // ── Stage 1: drug_drug_disease debate ─────────────────────────────────
-  const stage1Results = await runStage1(
-    tieredPairs,
-    opts.diseaseId,
-    opts,
-    (r) => {
-      if (r.error) {
-        liveOutput.stage1.errors.push(r);
-      } else if (r.predictedLabel === 1) {
-        liveOutput.stage1.effective.push(r);
-      } else {
-        liveOutput.stage1.ineffective.push(r);
-      }
-      flushOutput();
-    },
-  );
 
   const effectivePairs = stage1Results.filter(
     (r) => r.predictedLabel === 1 && !r.error,
@@ -1060,28 +1027,16 @@ async function main() {
     }
   }
 
-  // ── Stage 2: drug_drug_sideeffect for effective pairs ─────────────────
-  let stage2Results: Stage2PairResult[] = [];
-  if (effectivePairs.length > 0) {
-    stage2Results = await runStage2(
-      effectivePairs.map((p) => ({
-        drug1: p.drug1,
-        drug2: p.drug2,
-        tier: p.tier,
-      })),
-      seProfiles,
-      opts,
-      (pr) => {
-        liveOutput.stage2.push(pr);
-        flushOutput();
-      },
-    );
+  // ── Stage 2 was already run inline during Stage 1 for each effective pair ──
+  if (effectivePairs.length === 0) {
+    console.log('\nNo effective pairs found — Stage 2 not needed.');
   } else {
-    console.log('\nNo effective pairs found — skipping Stage 2.');
+    console.log(`\nStage 2 complete: ${stage2ResultsInline.length} pairs processed inline.`);
   }
 
+  // Build stage2Map from inline results collected during Stage 1
   const stage2Map = new Map<string, Stage2PairResult>();
-  for (const s2 of stage2Results) {
+  for (const s2 of stage2ResultsInline) {
     stage2Map.set(`${s2.drug1}::${s2.drug2}`, s2);
   }
 
@@ -1147,18 +1102,7 @@ async function main() {
     );
   }
 
-  // ── Write final output ─────────────────────────────────────────────────
-  liveOutput.summary = counts;
-  liveOutput.classified = classified;
-  liveOutput.stage1 = {
-    effective: effectivePairs,
-    ineffective: ineffectivePairs,
-    errors: errorPairs,
-  };
-  liveOutput.stage2 = stage2Results;
-  liveOutput.timestamp = new Date().toISOString();
-  flushOutput();
-  console.log(`\nResults written to ${opts.outputPath}`);
+  console.log(`\nJSONL records    : ${opts.jsonlPath}`);
 }
 
 main().catch((err) => {
