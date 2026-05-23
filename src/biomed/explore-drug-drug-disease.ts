@@ -974,9 +974,9 @@ async function main() {
           const asmMap = new Map<string, any>(
             ((r.trace as any)?.assessments ?? []).map((a: any) => [a.role, a]),
           );
-          const drugAgent = asmMap.get('drug_agent');
-          const diseaseAgent = asmMap.get('disease_agent');
-          const graphAgent = asmMap.get('graph_agent');
+          const drugAgent = asmMap.get('drug');
+          const diseaseAgent = asmMap.get('disease');
+          const graphAgent = asmMap.get('graph');
 
           // ── Map CUI codes to human-readable side-effect names ──────────
           const positiveSENames = (s2.positiveSideEffects ?? []).map(
